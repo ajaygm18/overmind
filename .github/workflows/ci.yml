@@ -23,6 +23,11 @@ jobs:
       - run: ruff check overmind tests
       - run: mypy overmind
       - run: pytest -q --ignore=tests/contracts
+      - name: MAST coverage table is generated, not typed
+        # docs/MAST-COVERAGE.md is derived from tests/mast/. A mode added to the
+        # docs without a trace, or a trace whose gate disagrees with the docs,
+        # fails here rather than ageing quietly into a false claim.
+        run: python tools/gen_coverage.py --check
       - name: config validates
         run: python -c "import overmind.config as c; c.load(); print('ok')"
 
