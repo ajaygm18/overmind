@@ -9,18 +9,52 @@ Status keys: `todo` · `doing` · `done` · `blocked`
 
 | # | Task | Depends on | Status |
 | --- | --- | --- | --- |
-| T01 | Policy compiler: gates → Omnigent policies | — | `todo` |
-| T02 | Agent YAML generation conforming to upstream spec | T01 | `todo` |
-| T03 | Worktree confinement (conflict C1) | T02 | `todo` |
-| T04 | Wire `restatement_fidelity` into `acceptance_drift` | — | `todo` |
-| T05 | Git fixture harness; test `integrate.py` for real | — | `todo` |
-| T06 | Strengthen the three weakest gates | — | `todo` |
+| T01 | Policy compiler: gates → Omnigent policies | — | `done` |
+| T02 | Agent YAML generation conforming to upstream spec | T01 | `done` |
+| T03 | Worktree confinement (conflict C1) | T02 | `done` |
+| T04 | Wire `restatement_fidelity` into `acceptance_drift` | — | `done` |
+| T05 | Git fixture harness; test `integrate.py` for real | — | `done` |
+| T06 | Strengthen the three weakest gates | — | `done` |
 | T07 | Upstream contract tests that actually assert | T02 | `todo` |
 | T08 | Bridge robustness and plan schema validation | — | `todo` |
 | T09 | Failure-mode evaluation harness | T01, T05 | `todo` |
 | T10 | Receipt → OpenTelemetry export | — | `todo` |
 | T11 | Reproducible dev environment | T02 | `todo` |
 | T12 | Release readiness: pins, packaging, quickstart | all | `todo` |
+
+### Deviations from spec
+
+Recorded here because a task marked `done` that quietly did something else is
+worse than one marked `blocked`.
+
+- **T02 / T03, spec location.** The spec said write `instructions` to a file *in
+  the worktree*. Doing so would make the orchestrator's own bookkeeping an
+  undeclared write inside the node's scope, failing that node's `declared_scope`
+  gate on its first tool call. Specs and instructions live in
+  `.overmind/specs/<run_id>/` instead, referenced by absolute path.
+- **T03, policy name.** `block_working_dir_changes` is named in `POLICIES.md`
+  without a dotted handler path, and only three builtin handler strings are
+  verbatim-confirmed. Emitting a guessed import path would fail at session
+  start, so confinement is enforced by an owned `dir_guard` handler plus
+  `sandbox.write_paths`. The acceptance criteria are met by different means; the
+  criterion "every generated spec contains `block_working_dir_changes`" is
+  **not** met and should not be claimed.
+- **T04, fallback.** The spec kept word overlap as the fallback when no
+  embedding source is available. There is no such state:
+  `restatement_fidelity_measured` degrades to n-grams internally and reports
+  which measure it used. Overlap is reported as a second opinion and is never
+  load-bearing, which satisfies the final subtask (remove the dead overlap-only
+  branch) by there being no branch.
+- **T06, `spec_conformance`.** The spec asked it to check exit-kind satisfaction
+  and declared-vs-actual writes. `exit_proof` and `action_trace` already gate
+  exactly those, and one failure reported by three gates reads as three
+  problems. It now refuses unparseable and evidence-free verdicts instead.
+  `role_scope` did take the measured-diff check the spec asked for.
+- **T05, `LEFT DIRTY` path.** Subtask 7 (simulate a rollback failure) is not
+  covered. Forcing `git reset --hard` to fail requires making the object store
+  unwritable mid-merge, which is platform-specific enough to be its own
+  liability. The branch is reachable and reported; it is untested, and
+  `docs/LIMITATIONS.md` will say so in T12.
 
 ---
 
