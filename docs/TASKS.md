@@ -15,8 +15,8 @@ Status keys: `todo` · `doing` · `done` · `blocked`
 | T04 | Wire `restatement_fidelity` into `acceptance_drift` | — | `done` |
 | T05 | Git fixture harness; test `integrate.py` for real | — | `done` |
 | T06 | Strengthen the three weakest gates | — | `done` |
-| T07 | Upstream contract tests that actually assert | T02 | `todo` |
-| T08 | Bridge robustness and plan schema validation | — | `todo` |
+| T07 | Upstream contract tests that actually assert | T02 | `done` |
+| T08 | Bridge robustness and plan schema validation | — | `done` |
 | T09 | Failure-mode evaluation harness | T01, T05 | `todo` |
 | T10 | Receipt → OpenTelemetry export | — | `todo` |
 | T11 | Reproducible dev environment | T02 | `todo` |
@@ -50,6 +50,28 @@ worse than one marked `blocked`.
   exactly those, and one failure reported by three gates reads as three
   problems. It now refuses unparseable and evidence-free verdicts instead.
   `role_scope` did take the measured-diff check the spec asked for.
+- **T07, what it found.** The job was worse than unasserted. It grepped
+  `omnigent run --help` for `--harness`, `--cwd` and `--policy` — flags T02
+  removed from `executor.py` — so it was guarding a contract this repo no longer
+  has, and `continue-on-error: true` meant nobody would have noticed either way.
+  The job is now blocking, and the two failure kinds are separated in the tests
+  rather than by a job-level flag: unreachable upstreams `skip`, changed
+  upstreams fail. `test_omnigent` derives its module paths from
+  `policy_export`'s own handler constants, so it also catches a typo in a string
+  we emit.
+- **T08, what it found.** Three silent repairs, not one: an unrecognised
+  `exit_check.kind` became `tests_pass`, a `command_exit_zero` with no command
+  became `tests_pass`, and a missing `role` became `implementer` — which can hand
+  write access to a task meant as research. The client was equally permissive,
+  accepting any 200 carrying a `nodes` key of any shape and coercing a
+  non-numeric `ambiguity` to `0.0`, which would silently disable
+  `ambiguity_halt`. Validation now lives in `bridge/schema.ts`, rejections name
+  the field by path, and `PlanInvalid` subclasses `PlanRejected` so existing
+  handlers keep working.
+- **T08, dry-run scope.** `overmind plan --dry-run` prints the POST body and the
+  recalled decisions, then stops. It does not validate a plan offline, because
+  there is no plan until the coordinator answers. Offline validation of the
+  *reaction* to each possible answer is in `tests/test_bridge_contract.py`.
 - **T05, `LEFT DIRTY` path.** Subtask 7 (simulate a rollback failure) is not
   covered. Forcing `git reset --hard` to fail requires making the object store
   unwritable mid-merge, which is platform-specific enough to be its own
