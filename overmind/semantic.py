@@ -78,7 +78,7 @@ def ngram_similarity(left: str, right: str) -> float:
     return 0.0 if na == 0.0 or nb == 0.0 else dot / (na * nb)
 
 
-def _parse_vectors(raw: object, expected: int) -> list[Vector] | None	:
+def _parse_vectors(raw: object, expected: int) -> list[Vector] | None:
     """Pull embedding vectors out of a tool response without assuming a shape.
 
     Ruflo ships constantly (1,488 releases). A changed response shape must cost
@@ -128,7 +128,9 @@ class Similarity:
             with RufloMemory(cfg) as mem:
                 raw = mem.call("embeddings_generate", {"texts": texts})
             vectors = _parse_vectors(raw, len(texts))
-        except (MemoryUnavailable, Exception):  # noqa: BLE001 - degrade, never fail the run
+        except (MemoryUnavailable, OSError, ValueError, TypeError, KeyError):
+            # Degrade to the offline measure. A memory outage must never be
+            # able to fail a run that is otherwise healthy.
             vectors = None
         if vectors:
             sim.source = "ruflo-embeddings"
