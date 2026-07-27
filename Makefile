@@ -1,4 +1,4 @@
-.PHONY: setup upstreams bridge test lint typecheck validate doctor update clean
+.PHONY: setup upstreams bridge dev-up dev-down dev-logs test lint typecheck validate doctor update clean
 
 # Every upstream is installed from its own registry. Overmind vendors nothing
 # and forks nothing, so `make update` is the whole upgrade path (ADR-001).
@@ -18,6 +18,22 @@ setup: upstreams
 
 bridge:
 	cd bridge && npm start
+
+# Containerised bridge + Jaeger. Optional: everything works with `make bridge`
+# and no Docker. See docs/DEVELOPMENT.md for what is deliberately not in here.
+dev-up:
+	@test -f .env || { echo "no .env -- run: cp .env.example .env, then add the planner's provider key"; exit 1; }
+	docker compose up -d --build
+	@echo
+	@echo "bridge:     http://127.0.0.1:7801/health"
+	@echo "jaeger UI:  http://127.0.0.1:16686"
+	@echo "now run:    overmind doctor"
+
+dev-down:
+	docker compose down
+
+dev-logs:
+	docker compose logs -f bridge
 
 test:
 	pytest -q
