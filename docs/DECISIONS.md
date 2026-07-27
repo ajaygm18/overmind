@@ -99,3 +99,42 @@ The string-equality one was the clearer failure. Agents rarely loop by issuing b
 **Decision.** Where a claim can be measured, measure it. Writes come from `git status`/`git diff` in the node's worktree (`introspect.py`), not from the plan. Repetition is compared by embedding similarity (`semantic.py`) via Ruflo's `embeddings_generate` — one of the ~10 tools the audit in ADR-002 found actually works — with a character-n-gram fallback so the gate still runs with no model, no network, and no upstream process.
 
 **Consequences.** `declared_scope` cannot be defeated by a harness that under-reports its tool calls, which is the specific weakness of the older `action_trace`; both are kept because they fail independently. The embedding path adds a memory dependency to a gate, so the fallback is mandatory and every result names the measure it used — `via ngram` should be read as the weaker check rather than silently trusted as the stronger one.
+
+---
+
+## ADR-009: A gate runs where its evidence is
+
+**Status:** accepted
+
+**Context.** All fourteen gates originally ran post-hoc, against receipts, after a node had finished. For several of them that is the wrong place and the right one already existed: Omnigent's `POLICIES.md` describes an in-session policy layer that sees every tool call before it executes, with ALLOW / DENY / ASK verdicts. A gate that can decide from a single tool call has no reason to wait for the node to end — waiting means the tokens are spent and the diff is written before anything objects.
+
+**Decision.** Placement follows the evidence, not the gate list.
+
+- **Decidable from one tool call → in-session policy.** `policy_export.compile_policies` emits `overmind_worktree_confinement`, `overmind_role_boundary`, `overmind_declared_scope`, `overmind_loop_guard`, and `overmind_tool_call_limit`, plus a conditional `overmind_node_budget`. A write outside the declared set is denied at the call, not reported afterwards.
+- **Needs the whole node → receipt gate.** `exit_proof`, `decision_surface`, `action_trace`, `acceptance_drift`, `spec_conformance`, `review_ack`, `checkpoint_continuity`. None of these can be judged from an individual call; they are questions about what the node did in total, or about whether its account of itself holds together.
+- **Needs the whole plan → plan gate.** `explicit_exit`, `verify_required`, `cross_vendor_verify`, `context_carry`, `ambiguity_halt`. These run before anything is spent, which is the cheapest possible place for a plan-shaped failure to be caught.
+
+**Three gates deliberately run in both places.** `declared_scope`, `role_scope`, and loop detection exist as a policy *and* as a receipt gate. They are not redundant, because they fail for different reasons: a harness that under-reports its tool calls defeats the receipt gate, and `git status` in the worktree does not care what the harness reported. Defence in depth here costs one function call per node.
+
+**Consequences.** The failure surfaces earlier and cheaper for the preventive half, and the composition layer now depends on the policy handler contract as well as the CLI surface — a second upstream coupling, covered by `tests/contracts/test_omnigent.py`. Policies can only see tool calls, so nothing about intent moved: `decision_surface` and `action_trace` remain detective by nature, recorded in `LIMITATIONS.md` rather than presented as prevention.
+
+---
+
+## ADR-010: Confine each session to its worktree using upstream's own policy layer
+
+**Status:** accepted
+
+**Context.** Each node runs in its own `git worktree` (ADR-007), which is what makes concurrent nodes safe to run and safe to abandon. Omnigent ships a builtin policy, `block_working_dir_changes`, whose documented defaults include `block_worktree: true` and `block_cd: true`, and which parses chained and wrapped shell commands. Its defaults are therefore incompatible with an executor whose entire isolation model is `git worktree add` — conflict C1 in `docs/upstream/COMPARISON.md`.
+
+The easy resolution is to switch the policy off. That trades the isolation guarantee for the mechanism that was supposed to enforce it: an agent free to `cd` out of its worktree can write to another node's tree, or to the base branch, and the receipt gates would only notice afterwards.
+
+**Decision.** Opt *into* confinement, and remove the reason the policy would fire.
+
+1. The worktree is created **host-side, by the orchestrator, before the session exists**. The agent never runs a worktree command, so blocking worktree commands costs nothing.
+2. `os_env.sandbox.write_paths` is pinned to that worktree, so the sandbox refuses writes outside it at the OS level.
+3. `dir_guard.allowed_dirs` is pinned to the same path, so directory escapes are denied at the tool-call level as well.
+4. The generated spec and instructions live in `.overmind/specs/<run_id>/`, outside the worktree and referenced by absolute path. Writing them inside would make the orchestrator's own bookkeeping an undeclared write in the node's scope, failing that node's `declared_scope` gate on its first tool call.
+
+**`block_working_dir_changes` itself is not emitted.** `POLICIES.md` names it without giving a dotted handler path, and only three builtin handler paths are verbatim-confirmed from upstream docs. Emitting a guessed import path would fail at session start, so the equivalent behaviour is enforced by an owned `dir_guard` handler. T03's acceptance criterion "every generated spec contains `block_working_dir_changes`" is therefore **not met**, and is recorded as unmet in `TASKS.md` and `LIMITATIONS.md` rather than described as satisfied.
+
+**Consequences.** Two independent layers stop an escape — OS sandbox and tool-call policy — and both are configured from one place, `agentspec.build_os_env`. The cost is that the confinement handler is ours: improvements upstream makes to its builtin are not inherited until the handler path is confirmed and the switch is made.
