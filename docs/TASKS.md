@@ -17,7 +17,7 @@ Status keys: `todo` · `doing` · `done` · `blocked`
 | T06 | Strengthen the three weakest gates | — | `done` |
 | T07 | Upstream contract tests that actually assert | T02 | `done` |
 | T08 | Bridge robustness and plan schema validation | — | `done` |
-| T09 | Failure-mode evaluation harness | T01, T05 | `todo` |
+| T09 | Failure-mode evaluation harness | T01, T05 | `done` |
 | T10 | Receipt → OpenTelemetry export | — | `todo` |
 | T11 | Reproducible dev environment | T02 | `todo` |
 | T12 | Release readiness: pins, packaging, quickstart | all | `todo` |
@@ -72,6 +72,24 @@ worse than one marked `blocked`.
   recalled decisions, then stops. It does not validate a plan offline, because
   there is no plan until the coordinator answers. Offline validation of the
   *reaction* to each possible answer is in `tests/test_bridge_contract.py`.
+- **T09, where the generated table lives.** The spec said regenerate the coverage
+  table *in* `docs/MAST-GATES.md`. A generator that rewrites one section of a
+  hand-written document either clobbers the prose around it or depends on marker
+  comments that rot. The generated table is `docs/MAST-COVERAGE.md`, written
+  whole by `tools/gen_coverage.py`; `MAST-GATES.md` keeps its hand-written
+  mapping and links to it. `--check` compares parsed rows rather than bytes, so
+  the prose in the generated file is still editable.
+- **T09, `prove_disjoint` levels.** That gate compares nodes within a
+  `plan.levels` entry, and `Plan.model_validate` does not compute levels — the
+  rewriter does, and it is not in the loop for a fixture. The driver reads a
+  trace as one concurrent level unless the trace says otherwise, which is what
+  both of its traces mean. A trace can override it with a `levels` key.
+- **T09, `mast_mode` asserted by prefix.** `clean_merge` and `prove_disjoint`
+  both report `conflicting implicit decisions`, while the docs distinguish
+  `(textual)` from `(semantic)`. The assertion is a prefix match rather than
+  equality, and it runs only on blocking results: several gates leave
+  `mast_mode` empty on PASS, which is right, since there is no failure to
+  classify.
 - **T05, `LEFT DIRTY` path.** Subtask 7 (simulate a rollback failure) is not
   covered. Forcing `git reset --hard` to fail requires making the object store
   unwritable mid-merge, which is platform-specific enough to be its own
