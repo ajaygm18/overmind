@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 import typer
 from rich.console import Console
@@ -544,6 +546,27 @@ def doctor(config: Path = typer.Option(Path("overmind.toml"), "--config")) -> No
             console.print(f"[yellow]ruflo memory unavailable: {exc}[/yellow] (degrades, not fatal)")
     else:
         console.print("[dim]ruflo memory disabled in config[/dim]")
+
+    # The container publishes OVERMIND_BRIDGE_PORT; the client dials
+    # [bridge] url. When those disagree the symptom is "bridge unreachable" on a
+    # bridge that is up, which sends people to inspect Docker rather than two
+    # numbers that do not match.
+    declared = os.environ.get("OVERMIND_BRIDGE_PORT")
+    if declared:
+        configured = urlparse(cfg.bridge.url).port
+        if configured is not None and str(configured) != declared.strip():
+            console.print(
+                f"[red]port mismatch:[/red] OVERMIND_BRIDGE_PORT={declared.strip()} "
+                f"but overmind.toml dials port {configured}"
+            )
+            ok = False
+        else:
+            console.print(f"[green]bridge port {declared.strip()} agrees with overmind.toml[/green]")
+
+    # Informational only. A GET to /v1/traces proves nothing, and POSTing to
+    # check liveness would put a fabricated trace in someone's backend.
+    if endpoint := os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
+        console.print(f"[dim]traces would export to {endpoint} (overmind export <run-id> --otlp)[/dim]")
 
     console.print(f"[green]vendors: {sorted(cfg.vendors)}[/green]")
     sys.exit(0 if ok else 1)
