@@ -1,0 +1,50 @@
+# Development environment. Two services, both optional to the Python side:
+# `overmind plan` needs the bridge, and nothing needs Jaeger unless you want to
+# look at a run.
+#
+# What is NOT here, and why, is the more useful half -- see docs/DEVELOPMENT.md:
+#   - Ruflo memory is a stdio MCP subprocess owned by the Python process. A
+#     container would put a network boundary across a pipe.
+#   - Omnigent runs the coding agents against a real git worktree with the
+#     operator's provider credentials. Containerising it means bind-mounting the
+#     repository and forwarding credentials inward, which is worse than
+#     installing it.
+
+services:
+  bridge:
+    build: ./bridge
+    # Published on loopback only. The bridge takes a goal and calls a paid model
+    # with it; it has no authentication of its own and must not be reachable off
+    # the host.
+    ports:
+      - "127.0.0.1:${OVERMIND_BRIDGE_PORT:-7801}:7801"
+    environment:
+      OVERMIND_BRIDGE_PORT: "7801"
+      OVERMIND_PLANNER_PROVIDER: "${OVERMIND_PLANNER_PROVIDER:-openai}"
+      OVERMIND_PLANNER_MODEL: "${OVERMIND_PLANNER_MODEL:-gpt-5.4}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+    env_file:
+      - path: .env
+        required: false
+    healthcheck:
+      # GET /health is what `overmind doctor` calls, so a healthy container and a
+      # happy doctor mean the same thing.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7801/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  jaeger:
+    # Ingests OTLP/HTTP directly on 4318, which is exactly what
+    # `overmind export <run-id> --otlp http://127.0.0.1:4318` produces. A
+    # collector in front of it would add a config file and no capability.
+    image: jaegertracing/all-in-one:1.62.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "127.0.0.1:16686:16686"  # UI
+      - "127.0.0.1:4318:4318"    # OTLP/HTTP
+    restart: unless-stopped
