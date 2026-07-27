@@ -36,7 +36,9 @@ The audit is a community post, not a peer-reviewed artifact, and upstream disput
 
 **Decision.** Serial by default. Parallel only when declared file sets are disjoint. Fan-out beyond `max_parallel` needs `--wide`. Cost logged per node so the 15x is visible rather than surprising.
 
-**Consequences.** Slower than swarm-first tools on genuinely parallel work, and the safeguard depends on the planner declaring file sets honestly. Under-declaration is caught after the fact by receipts, not prevented.
+**Consequences.** Slower than swarm-first tools on genuinely parallel work.
+
+**Amendment (see ADR-008).** The original text of this ADR ended: *"the safeguard depends on the planner declaring file sets honestly. Under-declaration is caught after the fact by receipts, not prevented."* That was a real hole and it is now partly closed. Declared sets are still what the rewriter schedules from — that cannot change, since the decision must be made before any code runs — but they are no longer the last word. Each node's actual writes are read out of git, `declared_scope` fails any undeclared path, and `prove_disjoint` re-asks the disjointness question of the measured sets once the level has finished. The residual risk is now narrow and specific: the *first* run that mis-declares a path can still produce two concurrent sessions that collide. That run fails at its gates rather than shipping, and the corrected path is written to memory so the next plan declares it.
 
 ---
 
@@ -69,3 +71,31 @@ The audit is a community post, not a peer-reviewed artifact, and upstream disput
 **Status:** accepted
 
 **Rationale.** Omnigent's UI is already multi-device and better than what this repo would produce. Large agent catalogues mostly encode prompt variation — five well-scoped roles with mandatory verification beats 100 roles without it. Swarm topologies (queen/mesh/hierarchical) are the least evidence-backed idea in the category; Overmind has one topology, a DAG with compulsory verification nodes.
+
+---
+
+## ADR-007: The run integrates its own worktrees
+
+**Status:** accepted
+
+**Context.** The first cut ran each node in its own `git worktree` on its own branch and stopped there. Gates passed, receipts were written, the run reported success — and the base branch was untouched. The parallelism was decorative, and the isolation that made it safe also made it useless.
+
+No upstream fills this in. Omnigent isolates sessions and does not reunify them. OMA schedules tasks and is not git-aware. Ruflo has no execution to integrate. This is composition-layer work by elimination, so it is written here.
+
+**Decision.** A successful run merges its writing nodes' branches into the base branch itself, in `integrate.py`. Two rules make it trustworthy: merges are **sequential in plan order**, never an octopus merge, so a genuine collision surfaces as a conflict at a known point instead of interleaving two agents' choices; and the base SHA is recorded up front so any conflict aborts the merge and resets the branch. Integration refuses to start on a dirty tree, because rollback would otherwise discard the operator's uncommitted work.
+
+**Consequences.** A run either lands completely or not at all. The cost is that a conflict wastes the whole level's work rather than half-landing it, which is the correct trade: a tree containing part of a plan is harder to reason about than one containing none of it.
+
+---
+
+## ADR-008: Measure what the plan asserts
+
+**Status:** accepted
+
+**Context.** Two of this repo's original gates trusted a language model's own account of its behaviour. `writes` was a promise made by the planner, and `loop_detect` compared tool calls by string equality. Both are the same mistake in different clothes: taking a model's description of what happened as evidence of what happened.
+
+The string-equality one was the clearer failure. Agents rarely loop by issuing byte-identical calls; they loop by rephrasing. `grep "device_code"`, then `grep "device code"`, then `grep "device-code"` is a stuck agent burning budget, and hash comparison sees three distinct productive actions.
+
+**Decision.** Where a claim can be measured, measure it. Writes come from `git status`/`git diff` in the node's worktree (`introspect.py`), not from the plan. Repetition is compared by embedding similarity (`semantic.py`) via Ruflo's `embeddings_generate` — one of the ~10 tools the audit in ADR-002 found actually works — with a character-n-gram fallback so the gate still runs with no model, no network, and no upstream process.
+
+**Consequences.** `declared_scope` cannot be defeated by a harness that under-reports its tool calls, which is the specific weakness of the older `action_trace`; both are kept because they fail independently. The embedding path adds a memory dependency to a gate, so the fallback is mandatory and every result names the measure it used — `via ngram` should be read as the weaker check rather than silently trusted as the stronger one.
