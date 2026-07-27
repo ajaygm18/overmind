@@ -13,6 +13,7 @@ jobs:
   python:
     # The rewriter, router, and gates are pure functions over plan data, so the
     # whole suite runs with no model calls, no network, and no upstreams.
+    # tests/contracts is excluded here and owned by the contracts job below.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,7 +22,7 @@ jobs:
       - run: uv pip install --system -e ".[dev]"
       - run: ruff check overmind tests
       - run: mypy overmind
-      - run: pytest -q
+      - run: pytest -q --ignore=tests/contracts
       - name: config validates
         run: python -c "import overmind.config as c; c.load(); print('ok')"
 
@@ -41,29 +42,31 @@ jobs:
     # ADR-001 buys upstream fixes for free and inherits upstream churn. Ruflo
     # alone has shipped 1,488 releases. This job exists so drift breaks loudly
     # here rather than quietly in someone's run.
+    #
+    # Deliberately NOT continue-on-error. The tests already separate the two
+    # cases: unreachable upstreams skip, changed upstreams fail. Marking the
+    # whole job non-blocking is how the previous version became decorative --
+    # it emitted ::warning:: lines for a contract that no longer existed and
+    # nothing ever went red.
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - uses: astral-sh/setup-uv@v3
+      - run: uv python install 3.12
+      - run: uv pip install --system -e ".[dev]"
 
-      - name: omnigent CLI still exposes the flags executor.py passes
-        run: |
-          uv tool install --python 3.12 omnigent
-          omnigent run --help > help.txt 2>&1 || true
-          for flag in --harness --cwd --non-interactive --json --policy; do
-            grep -q -- "$flag" help.txt || echo "::warning::omnigent run no longer documents $flag"
-          done
+      - name: install omnigent
+        run: uv tool install --python 3.12 omnigent || echo "omnigent unavailable; its tests will skip"
 
-      - name: ruflo still exposes the four allowlisted memory tools
-        run: |
-          npx --yes ruflo@latest --version || echo "::warning::ruflo CLI unavailable"
+      - name: observed upstream versions
+        run: echo "### Observed upstream versions" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: open-multi-agent still exports OpenMultiAgent
-        working-directory: bridge
-        run: |
-          npm install
-          node -e "import('@open-multi-agent/core').then(m => { if (!m.OpenMultiAgent) { console.log('::warning::OpenMultiAgent export missing'); process.exit(0) } console.log('ok') })"
+      - name: contract tests
+        # -rs prints the skip reasons, so 'unreachable' is visible in the log
+        # and never mistaken for 'passed'.
+        env:
+          OVERMIND_CONTRACTS: "1"
+        run: pytest tests/contracts -q -rs
