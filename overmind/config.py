@@ -21,7 +21,9 @@ class BridgeConfig(BaseModel):
 
 class MemoryConfig(BaseModel):
     enabled: bool = True
-    command: list[str] = Field(default_factory=lambda: ["npx", "ruflo@latest", "mcp", "start"])
+    command: list[str] = Field(
+        default_factory=lambda: ["npx", "ruflo@latest", "mcp", "start"]
+    )
     recall_limit: int = 12
 
 
@@ -41,6 +43,15 @@ class Config(BaseModel):
     vendors: dict[str, str] = Field(default_factory=dict)
     # role -> preferred vendor
     roles: dict[str, str] = Field(default_factory=dict)
+    # vendor -> model id, emitted as executor.model in generated specs.
+    # Optional: AGENT_YAML_SPEC allows CLI flags to supply a missing model.
+    models: dict[str, str] = Field(default_factory=dict)
+    # vendor -> executor.auth block, emitted verbatim. Optional because several
+    # harnesses (cursor, copilot, kimi) authenticate from the ambient
+    # environment and documented-ly take no auth block at all.
+    auth: dict[str, dict[str, str]] = Field(default_factory=dict)
+    # tool name -> declaration, passed through to generated specs
+    tools: dict[str, dict[str, object]] = Field(default_factory=dict)
     bridge: BridgeConfig = Field(default_factory=BridgeConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     policies: PolicyConfig = Field(default_factory=PolicyConfig)
@@ -64,6 +75,19 @@ class Config(BaseModel):
             raise ValueError(f"roles reference unconfigured vendors: {sorted(unknown)}")
         return self
 
+    @model_validator(mode="after")
+    def _models_and_auth_name_known_vendors(self) -> Config:
+        """A model or auth block keyed by a typo would be silently ignored.
+
+        Silently ignored configuration is how a run ends up on the wrong model
+        while the config file looks correct, so it is rejected instead.
+        """
+        for label, mapping in (("models", self.models), ("auth", self.auth)):
+            unknown = sorted(set(mapping) - set(self.vendors))
+            if unknown:
+                raise ValueError(f"[{label}] references unconfigured vendors: {unknown}")
+        return self
+
     def harness_for(self, vendor: str) -> str:
         try:
             return self.vendors[vendor]
@@ -74,6 +98,8 @@ class Config(BaseModel):
 def load(path: Path | str = "overmind.toml") -> Config:
     p = Path(path)
     if not p.exists():
-        raise FileNotFoundError(f"{p} not found; copy the one in the repo root and edit it")
+        raise FileNotFoundError(
+            f"{p} not found; copy the one in the repo root and edit it"
+        )
     with p.open("rb") as fh:
         return Config.model_validate(tomllib.load(fh))

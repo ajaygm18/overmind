@@ -8,12 +8,15 @@ license = { text = "Apache-2.0" }
 
 # Deliberately thin. The orchestration engine, sandbox, and memory store are
 # external processes (omnigent CLI, OMA bridge, ruflo MCP), not Python deps.
+# pyyaml is here because agent specs are YAML and Omnigent reads them; writing
+# YAML by hand-rolled serializer would be a bug factory for no benefit.
 dependencies = [
     "pydantic>=2.9",
     "httpx>=0.27",
     "typer>=0.12",
     "rich>=13.7",
     "tomli-w>=1.0",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -22,6 +25,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "mypy>=1.11",
     "ruff>=0.6",
+    "types-PyYAML>=6.0",
 ]
 
 [project.scripts]

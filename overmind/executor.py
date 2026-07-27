@@ -3,6 +3,13 @@
 Everything about isolation is Omnigent's: bwrap on Linux, seatbelt on macOS,
 plus its three-level policy stack. Overmind never shells out to a model
 directly, so there is exactly one execution path and it is sandboxed.
+
+The worktree is created **here, in the host process, before the session
+exists**. That ordering is load-bearing rather than incidental. Omnigent's
+`block_working_dir_changes` policy blocks `git worktree add` by default, and
+`dir_guard` enforces the same thing for the generated specs -- so an agent that
+needed to create its own worktree would be denied. It never needs to: it is
+handed a worktree it did not create and cannot leave.
 """
 
 from __future__ import annotations
@@ -14,6 +21,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .agentspec import write_spec
 from .config import Config
 from .models import ExitKind, Receipt, TaskNode
 
@@ -36,6 +44,7 @@ class NodeOutcome:
     tool_calls: list[dict[str, object]] = field(default_factory=list)
     decisions: list[str] = field(default_factory=list)
     stdout_tail: str = ""
+    spec: Path | None = None
     error: str | None = None
 
 
@@ -45,67 +54,29 @@ def preflight() -> list[str]:
     return missing
 
 
-def _run(cmd: list[str], cwd: Path | None = None, timeout: int = 3600) -> subprocess.CompletedProcess[str]:
+def _run(
+    cmd: list[str], cwd: Path | None = None, timeout: int = 3600
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(  # noqa: S603 - argv list, no shell
         cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False
     )
 
 
 def make_worktree(node: TaskNode, run_id: str) -> Path:
-    """Isolate the node. Two sessions never share a tree."""
+    """Isolate the node. Two sessions never share a tree.
+
+    Runs in the host process. Nothing inside a sandboxed session is permitted to
+    call this, and the generated policy set denies `git worktree` outright.
+    """
     WORKTREE_ROOT.mkdir(parents=True, exist_ok=True)
     path = WORKTREE_ROOT / f"{run_id}-{node.id}"
     branch = f"overmind/{run_id}/{node.id}"
     res = _run(["git", "worktree", "add", "-b", branch, str(path)])
     if res.returncode != 0:
-        raise ExecutorError(f"git worktree add failed for {node.id}: {res.stderr.strip()[:300]}")
-    return path
-
-
-def _policy_flags(cfg: Config, node: TaskNode) -> list[str]:
-    """Overmind ships defaults; Omnigent evaluates them."""
-    flags: list[str] = []
-    if cfg.policies.ask_on_shell:
-        flags += ["--policy", "omnigent.policies.builtins.safety.ask_on_os_tools"]
-    flags += [
-        "--policy-param",
-        f"max_tool_calls_per_session.limit={cfg.policies.max_tool_calls_per_session}",
-    ]
-    if node.budget_usd:
-        flags += ["--policy-param", f"cost_budget.max_cost_usd={node.budget_usd}"]
-    return flags
-
-
-def _agent_file(node: TaskNode) -> Path:
-    path = Path("agents") / f"{node.role}.yaml"
-    if not path.exists():
-        raise ExecutorError(f"no agent definition at {path} for role {node.role}")
-    return path
-
-
-def _prompt(node: TaskNode) -> str:
-    """The acceptance criterion is passed verbatim. The worker never restates it."""
-    lines = [
-        f"TASK: {node.intent}",
-        "",
-        f"ACCEPTANCE (verbatim, do not paraphrase): {node.acceptance}",
-        "",
-        f"You may modify only: {', '.join(node.writes) or '(nothing)'}",
-        f"You may read: {', '.join(node.reads) or '(anything in the tree)'}",
-        "",
-        f"EXIT: this task is done when {node.exit_check.kind}"
-        + (f" via `{node.exit_check.command}`" if node.exit_check.command else ""),
-        "",
-        "Before finishing, emit a line `DECISION: <what you chose and why>` for every choice "
-        "you made that was not dictated by the task above. Undeclared decisions that surface "
-        "later in review fail the run.",
-    ]
-    if node.inspects:
-        lines.append(
-            f"\nYou are inspecting node {node.inspects}. Compare its output to the ACCEPTANCE "
-            "text above, not to your own summary of it. Start your verdict with PASS or FAIL."
+        raise ExecutorError(
+            f"git worktree add failed for {node.id}: {res.stderr.strip()[:300]}"
         )
-    return "\n".join(lines)
+    return path
 
 
 def _parse_decisions(stdout: str) -> list[str]:
@@ -149,7 +120,9 @@ def check_exit(node: TaskNode, worktree: Path) -> int | None:
     """Evaluate the node's machine-checkable exit condition."""
     kind = node.exit_check.kind
     if kind is ExitKind.COMMAND_EXIT_ZERO and node.exit_check.command:
-        return _run(["bash", "-lc", node.exit_check.command], cwd=worktree, timeout=1800).returncode
+        return _run(
+            ["bash", "-lc", node.exit_check.command], cwd=worktree, timeout=1800
+        ).returncode
     if kind is ExitKind.TESTS_PASS:
         return _run(["bash", "-lc", "make test"], cwd=worktree, timeout=1800).returncode
     if kind is ExitKind.BUILD_SUCCEEDS:
@@ -168,30 +141,28 @@ def diff_stat(worktree: Path) -> str | None:
 
 
 def execute(node: TaskNode, cfg: Config, run_id: str) -> NodeOutcome:
-    """Run one node. Never raises for model-side failure; that goes in the outcome."""
+    """Run one node. Never raises for model-side failure; that goes in the outcome.
+
+    Ordering: worktree first, then spec, then session. The spec names the
+    worktree in `os_env.sandbox.write_paths` and in the confinement policy, so
+    it cannot be written before the worktree exists.
+    """
     if node.harness is None:
         raise ExecutorError(f"node {node.id} was not routed")
 
     worktree = make_worktree(node, run_id)
-    cmd = [
-        "omnigent",
-        "run",
-        str(_agent_file(node)),
-        "--harness",
-        node.harness,
-        "--cwd",
-        str(worktree),
-        "--non-interactive",
-        "--json",
-        "--prompt",
-        _prompt(node),
-        *_policy_flags(cfg, node),
-    ]
+    spec = write_spec(node, cfg, run_id, worktree)
+
+    # Everything the session needs is in the spec: harness, model, auth,
+    # instructions, sandbox, policies. No inferred policy flags.
+    cmd = ["omnigent", "run", str(spec), "--non-interactive", "--json"]
 
     try:
         res = _run(cmd, timeout=7200)
     except subprocess.TimeoutExpired:
-        return NodeOutcome(node.id, None, None, worktree, error="omnigent session timed out")
+        return NodeOutcome(
+            node.id, None, None, worktree, spec=spec, error="omnigent session timed out"
+        )
 
     cost, tin, tout, calls = _parse_usage(res.stdout)
     outcome = NodeOutcome(
@@ -205,6 +176,7 @@ def execute(node: TaskNode, cfg: Config, run_id: str) -> NodeOutcome:
         tool_calls=calls,
         decisions=_parse_decisions(res.stdout),
         stdout_tail=res.stdout[-4000:],
+        spec=spec,
     )
 
     if res.returncode != 0:
@@ -215,7 +187,9 @@ def execute(node: TaskNode, cfg: Config, run_id: str) -> NodeOutcome:
     return outcome
 
 
-def to_receipt(run_id: str, plan_hash: str, node: TaskNode, outcome: NodeOutcome) -> Receipt:
+def to_receipt(
+    run_id: str, plan_hash: str, node: TaskNode, outcome: NodeOutcome
+) -> Receipt:
     status = "ok" if outcome.error is None and outcome.exit_code == 0 else "failed"
     return Receipt(
         run_id=run_id,
