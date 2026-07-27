@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as installed_version
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -570,6 +573,45 @@ def doctor(config: Path = typer.Option(Path("overmind.toml"), "--config")) -> No
 
     console.print(f"[green]vendors: {sorted(cfg.vendors)}[/green]")
     sys.exit(0 if ok else 1)
+
+
+def _tool_version(command: list[str]) -> str:
+    """First line of `<tool> --version`, or a clear absence.
+
+    Some tools print their version to stderr, so both streams are read; a
+    version line on stderr is not an error.
+    """
+    try:
+        done = subprocess.run(command, capture_output=True, text=True, timeout=15, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return "[red]not installed[/red]"
+    lines = (done.stdout or done.stderr).strip().splitlines()
+    return lines[0] if lines else "[yellow]unknown[/yellow]"
+
+
+@app.command()
+def version() -> None:
+    """Print this version and the upstream versions actually installed.
+
+    Omnigent and Ruflo float deliberately (docs/PINS.md), so "which version" is a
+    question about this machine rather than about the repository. This is the
+    output to paste into a bug report.
+    """
+    try:
+        mine = installed_version("overmind")
+    except PackageNotFoundError:
+        mine = "0.1.0 (from source, not installed)"
+
+    console.print(f"[bold]overmind[/bold] {mine}")
+    console.print(f"python   {sys.version.split()[0]}")
+    for label, command in (
+        ("omnigent", ["omnigent", "--version"]),
+        ("node", ["node", "--version"]),
+        ("git", ["git", "--version"]),
+    ):
+        console.print(f"{label:8} {_tool_version(command)}")
+
+    console.print("[dim]upstream revisions this was written against: docs/PINS.md[/dim]")
 
 
 @app.command()
