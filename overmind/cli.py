@@ -16,6 +16,7 @@ from . import (
     gates,
     introspect,
     linearity,
+    otel,
     planner,
     receipts,
     router,
@@ -448,6 +449,60 @@ def replay(
         )
     console.print(table)
     console.print(json.dumps(receipts.summarize(entries), indent=2))
+
+
+@app.command()
+def export(
+    run_id: str,
+    config: Path = typer.Option(Path("overmind.toml"), "--config"),
+    otlp: str | None = typer.Option(
+        None, "--otlp", help="OTLP/HTTP collector URL, e.g. http://127.0.0.1:4318"
+    ),
+    out: Path | None = typer.Option(None, "--out", help="write the payload to this file"),
+) -> None:
+    """Export a run's receipts as OpenTelemetry spans.
+
+    With no destination the payload goes to stdout, which is what makes it
+    pipeable and diffable. Span ids are derived from the run and node ids, so
+    exporting the same run twice produces the same trace rather than a duplicate.
+    """
+    cfg = _load(config)
+    try:
+        path = receipts.find(cfg.receipts, run_id)
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from exc
+
+    entries = list(receipts.iter_receipts(path))
+    if not entries:
+        console.print(f"[red]run {run_id} has no receipts to export[/red]")
+        raise typer.Exit(2)
+
+    payload = otel.to_otlp(entries)
+    count = otel.span_count(payload)
+
+    if out is None and otlp is None:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+
+    if out is not None:
+        console.print(f"[green]wrote {count} span(s) to {otel.write(payload, out)}[/green]")
+
+    if otlp is not None:
+        try:
+            status = otel.post(payload, otlp)
+        except otel.ExportFailed as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(2) from exc
+        console.print(f"[green]exported {count} span(s) to {otlp} ({status})[/green]")
+
+    # Said out loud, not buried in a docstring: whoever is about to read these
+    # spans in a backend is exactly the person who must not mistake a derived
+    # duration for a measured one.
+    console.print(
+        "[dim]span durations are derived from ledger order; receipts record "
+        "completion time only[/dim]"
+    )
 
 
 @app.command(name="list")
