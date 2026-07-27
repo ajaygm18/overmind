@@ -19,7 +19,7 @@ Status keys: `todo` · `doing` · `done` · `blocked`
 | T08 | Bridge robustness and plan schema validation | — | `done` |
 | T09 | Failure-mode evaluation harness | T01, T05 | `done` |
 | T10 | Receipt → OpenTelemetry export | — | `done` |
-| T11 | Reproducible dev environment | T02 | `todo` |
+| T11 | Reproducible dev environment | T02 | `done` |
 | T12 | Release readiness: pins, packaging, quickstart | all | `todo` |
 
 ### Deviations from spec
@@ -107,6 +107,21 @@ worse than one marked `blocked`.
   operator chose not to scrub locally. Spans go to third-party backends, so only
   tool names and counts leave the machine. A test greps a rendered payload for a
   fixture secret.
+- **T11, two parts stay on the host.** The spec said containerise the dev
+  environment. Only the bridge went in. Ruflo memory is a stdio MCP subprocess
+  owned by the Python process — a container would put a network boundary across
+  a pipe that has no network transport — and Omnigent needs the real worktree and
+  the operator's provider credentials, so containerising it means bind-mounting
+  the repository and forwarding credentials inward. Both reasons are in
+  `docs/DEVELOPMENT.md` next to the table of what runs where.
+- **T11, Jaeger instead of a collector.** T10 emits OTLP/HTTP and Jaeger ingests
+  it directly on 4318 with one environment variable. An OTLP collector in front
+  would add a config file to maintain for no capability at this scale.
+- **T11, the image is repeatable, not reproducible.** `bridge/` has no
+  `package-lock.json`, so `npm install` in the image resolves within the declared
+  semver ranges at build time and two builds a month apart can differ. Generating
+  a lockfile requires an npm run, so this is recorded rather than claimed:
+  **`docs/LIMITATIONS.md` (T12) must list it.**
 - **T05, `LEFT DIRTY` path.** Subtask 7 (simulate a rollback failure) is not
   covered. Forcing `git reset --hard` to fail requires making the object store
   unwritable mid-merge, which is platform-specific enough to be its own
