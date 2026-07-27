@@ -20,7 +20,7 @@ Status keys: `todo` · `doing` · `done` · `blocked`
 | T09 | Failure-mode evaluation harness | T01, T05 | `done` |
 | T10 | Receipt → OpenTelemetry export | — | `done` |
 | T11 | Reproducible dev environment | T02 | `done` |
-| T12 | Release readiness: pins, packaging, quickstart | all | `todo` |
+| T12 | Release readiness: pins, packaging, quickstart | all | `done` |
 
 ### Deviations from spec
 
@@ -122,6 +122,28 @@ worse than one marked `blocked`.
   semver ranges at build time and two builds a month apart can differ. Generating
   a lockfile requires an npm run, so this is recorded rather than claimed:
   **`docs/LIMITATIONS.md` (T12) must list it.**
+- **T12, what the README audit found.** Five claims were stale or contradicted by
+  the repo's own documents. The file tree listed 7 modules and omitted 8 — every
+  module written after the first cut. "Roughly 900 lines of Python" had stopped
+  being true, and a number that needs updating every commit is not worth
+  asserting, so it is gone rather than corrected. "Maps all 14 modes" was a claim
+  about a document; it now points at the generated coverage table. "Adapters are
+  pinned and contract-tested" was half true — `PINS.md` states plainly that
+  nothing is pinned and why, so the README could not keep saying otherwise.
+  "`gates.py` catches this after the fact via receipts, not before" was
+  superseded by the ADR-003 amendment and T01's in-session policies.
+- **T12, `PINS.md` corrects ADR-001 rather than restating it.** ADR-001 says
+  adapters are "pinned and contract-tested". The contract tests exist and are
+  blocking; the pinning does not. Every Python dependency is a lower bound, there
+  is no `uv.lock` and no `package-lock.json`, and Omnigent and Ruflo install as
+  latest on purpose. `PINS.md` says so in the opening paragraph instead of
+  presenting the ADR's wording as current fact.
+- **T12, no version bump and no publish.** The spec listed "bump version, publish
+  to PyPI". `0.1.0` stays, because nothing has been released to bump from and a
+  version number should mark a release rather than a task. Publishing needs a
+  PyPI account and a claimed name, which is not a code change and is not done
+  here; `overmind version` reports `0.1.0 (from source, not installed)` when run
+  from a checkout, which is the honest answer.
 - **T05, `LEFT DIRTY` path.** Subtask 7 (simulate a rollback failure) is not
   covered. Forcing `git reset --hard` to fail requires making the object store
   unwritable mid-merge, which is platform-specific enough to be its own
