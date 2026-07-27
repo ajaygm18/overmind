@@ -8,6 +8,12 @@ capability, which is why these are gates over artifacts and not prompt text.
 A gate inspects a diff, an exit code, or a receipt. It passes or it does not.
 Unlike a prompt instruction, it does not degrade when the model changes.
 
+Some of these now have in-session counterparts in `policies/runtime.py`, which
+can DENY a bad call instead of reporting it afterwards. The overlap is
+deliberate: a policy sees what the harness reports, while these gates read git
+and exit codes, so a harness that under-reports its tool calls defeats the
+former and not the latter. See ADR-009.
+
 See docs/MAST-GATES.md for the full mode-to-gate mapping, including the three
 gates that are detective rather than preventive.
 """
@@ -18,9 +24,27 @@ import re
 from collections import Counter
 from collections.abc import Iterable
 
+from .config import MemoryConfig
 from .models import GateResult, GateStatus, Plan, Receipt, Role, TaskNode
+from .semantic import restatement_fidelity
 
 _REJECTION = re.compile(r"\b(reject|won'?t fix|out of scope|disagree|not applicable)\b", re.I)
+_VERDICT = re.compile(r"^\s*(pass|fail)\b", re.I)
+_WORD = re.compile(r"[a-z0-9]{4,}")
+
+# Minimum similarity between the original acceptance text and the verifier's
+# restatement of it. Lower than a word-overlap threshold would be, because the
+# measure is similarity of meaning: a faithful paraphrase scores well below 1.0
+# and must still pass.
+DRIFT_THRESHOLD = 0.55
+
+# A verdict shorter than this is a vote, not a finding.
+MIN_VERDICT_WORDS = 5
+
+# Roles that inspect. Mirrors policy_export.INSPECTION_ROLES; the two are
+# checked against each other in tests rather than sharing a mutable import, so
+# that neither module can silently widen the other's definition.
+INSPECTION_ROLES = frozenset({Role.VERIFIER, Role.REVIEWER, Role.RESEARCHER, Role.PLANNER})
 
 
 def _ok(gate: str, mode: str, detail: str = "") -> GateResult:
@@ -33,6 +57,12 @@ def _fail(gate: str, mode: str, detail: str) -> GateResult:
 
 def _halt(gate: str, mode: str, detail: str) -> GateResult:
     return GateResult(gate=gate, status=GateStatus.HALT, mast_mode=mode, detail=detail)
+
+
+def _word_overlap(original: str, restated: str) -> float:
+    left = set(_WORD.findall(original.lower()))
+    right = set(_WORD.findall(restated.lower()))
+    return len(left & right) / len(left) if left else 0.0
 
 
 # --------------------------------------------------------------------------
@@ -121,28 +151,76 @@ def ambiguity_halt(score: float, threshold: float) -> GateResult:
     return _ok("ambiguity_halt", "fail to ask for clarification", f"ambiguity {score:.2f}")
 
 
+def _reachable(plan: Plan) -> dict[str, set[str]]:
+    """For each node, every node it transitively depends on.
+
+    Needed because ordering, not adjacency, is what makes two conflicting nodes
+    safe. Cycles cannot occur -- linearity.validate topologically sorts the plan
+    before this runs -- but the walk is iterative anyway so a malformed plan
+    produces a gate failure rather than a recursion error.
+    """
+    direct = {node.id: set(node.depends_on) for node in plan.nodes}
+    closure: dict[str, set[str]] = {}
+
+    for node_id in direct:
+        seen: set[str] = set()
+        stack = list(direct[node_id])
+        while stack:
+            current = stack.pop()
+            if current in seen or current not in direct:
+                continue
+            seen.add(current)
+            stack.extend(direct[current])
+        closure[node_id] = seen
+
+    return closure
+
+
 def context_carry(plan: Plan) -> list[GateResult]:
     """MAST: loss of conversation history.
 
     When the rewriter serialized two conflicting nodes, the successor must
-    inherit the predecessor's transcript. Verified structurally: a node that
-    writes files another node also touches must depend on it.
+    inherit the predecessor's transcript. Verified structurally: two nodes that
+    write the same file must be *ordered* with respect to each other.
+
+    Ordering means reachable, not adjacent. The earlier version required a
+    direct `depends_on` edge, which failed a perfectly safe chain A -> B -> C
+    whenever A and C touched the same file -- a false positive that would have
+    trained users to ignore this gate.
     """
-    results = []
+    closure = _reachable(plan)
+    results: list[GateResult] = []
+    seen_pairs: set[tuple[str, str]] = set()
+
     for node in plan.nodes:
         for other in plan.nodes:
             if other.id == node.id or not node.conflicts_with(other):
                 continue
-            linked = other.id in node.depends_on or node.id in other.depends_on
-            if not linked:
+            pair = tuple(sorted((node.id, other.id)))
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)  # type: ignore[arg-type]
+
+            ordered = other.id in closure[node.id] or node.id in closure[other.id]
+            if not ordered:
                 results.append(
                     _fail(
                         "context_carry",
                         "loss of conversation history",
-                        f"{node.id} and {other.id} conflict but neither depends on the other",
+                        f"{node.id} and {other.id} write the same path but neither is "
+                        "ordered before the other; the second cannot see the first's work",
                     )
                 )
-    return results or [_ok("context_carry", "loss of conversation history", "all conflicts chained")]
+
+    if results:
+        return results
+    return [
+        _ok(
+            "context_carry",
+            "loss of conversation history",
+            f"{len(seen_pairs)} conflicting pair(s), all ordered",
+        )
+    ]
 
 
 def plan_gates(plan: Plan, ambiguity: float, threshold: float) -> list[GateResult]:
@@ -161,7 +239,21 @@ def plan_gates(plan: Plan, ambiguity: float, threshold: float) -> list[GateResul
 
 
 def role_scope(node: TaskNode, allowed_tools: Iterable[str], receipt: Receipt) -> GateResult:
-    """MAST: disobey role specification. Terminate, not warn."""
+    """MAST: disobey role specification. Terminate, not warn.
+
+    Two questions, not one. Did the node use a tool outside its declared set --
+    and, for an inspection role, did it produce a diff at all? The second is the
+    one that matters: a verifier that can edit code can make its own check pass,
+    and it needs no unusual tool to do it.
+    """
+    if node.role in INSPECTION_ROLES and receipt.diff_stat:
+        return _fail(
+            "role_scope",
+            "disobey role specification",
+            f"{node.id} has role {node.role} and must not produce edits, but changed "
+            f"code: {receipt.diff_stat.strip()[:160]}",
+        )
+
     allowed = set(allowed_tools)
     used = {str(c.get("tool", "")) for c in receipt.tool_calls}
     outside = sorted(t for t in used - allowed if t)
@@ -175,7 +267,12 @@ def role_scope(node: TaskNode, allowed_tools: Iterable[str], receipt: Receipt) -
 
 
 def loop_detect(receipt: Receipt, limit: int = 3) -> GateResult:
-    """MAST: step repetition. Catches identical repetition only; see docs."""
+    """MAST: step repetition. Catches identical repetition only; see docs.
+
+    Superseded in practice by `semantic.loop_detect_semantic` and by the
+    in-session `policies.runtime.loop_guard`. Retained because it needs no
+    similarity measure at all, so it still works when both are unavailable.
+    """
     signatures = Counter(
         (str(c.get("tool")), repr(sorted((c.get("args") or {}).items())))
         if isinstance(c.get("args"), dict)
@@ -210,35 +307,84 @@ def exit_proof(node: TaskNode, exit_code: int | None) -> GateResult:
 
 
 def spec_conformance(node: TaskNode, verdict: str) -> GateResult:
-    """MAST: disobey task specification. Verdict comes from the verify node."""
-    if verdict.strip().lower().startswith("pass"):
-        return _ok("spec_conformance", "disobey task specification", node.id)
-    return _fail(
-        "spec_conformance",
-        "disobey task specification",
-        f"{node.id} did not satisfy: {node.acceptance[:160]}",
-    )
+    """MAST: disobey task specification. Verdict comes from the verify node.
+
+    An unparseable verdict is not a pass. Neither is the bare word 'pass': the
+    verifier was asked whether the acceptance criterion is met, and a one-word
+    answer is a vote rather than a finding. Treating either as success is how a
+    verification step becomes a formality.
+    """
+    text = verdict.strip()
+    match = _VERDICT.match(text)
+
+    if not match:
+        return _fail(
+            "spec_conformance",
+            "disobey task specification",
+            f"{node.id}: verdict does not begin with PASS or FAIL, so it cannot be "
+            f"read as a judgement: {text[:120]!r}",
+        )
+
+    if match.group(1).lower() == "fail":
+        return _fail(
+            "spec_conformance",
+            "disobey task specification",
+            f"{node.id} did not satisfy: {node.acceptance[:160]}",
+        )
+
+    if len(text.split()) < MIN_VERDICT_WORDS:
+        return _fail(
+            "spec_conformance",
+            "disobey task specification",
+            f"{node.id}: verdict {text[:60]!r} states a result with no evidence for it",
+        )
+
+    return _ok("spec_conformance", "disobey task specification", node.id)
 
 
-def acceptance_drift(node: TaskNode, restated: str) -> GateResult:
+def acceptance_drift(
+    node: TaskNode, restated: str, cfg: MemoryConfig | None = None
+) -> GateResult:
     """MAST: task derailment.
 
     The verifier compares against the ORIGINAL acceptance text. If it restated
-    the criterion, we check the restatement still overlaps the original; a
-    verifier grading its own paraphrase is how derailment goes unnoticed.
+    the criterion, the restatement must still mean the same thing -- a verifier
+    grading its own paraphrase is how derailment goes unnoticed.
+
+    The measure is similarity of meaning, not shared vocabulary. Word overlap
+    scored 'the login endpoint returns 200' against 'auth works' as total drift
+    while scoring a restatement that reuses the words and checks something else
+    as perfect fidelity, which inverts the gate's purpose. Both numbers are
+    reported so that a threshold set wrongly is visible in the receipt.
     """
-    original = set(re.findall(r"[a-z0-9]{4,}", node.acceptance.lower()))
-    echoed = set(re.findall(r"[a-z0-9]{4,}", restated.lower()))
+    original = node.acceptance.strip()
     if not original:
         return _fail("acceptance_drift", "task derailment", f"{node.id} has empty acceptance")
-    overlap = len(original & echoed) / len(original)
-    if overlap < 0.4:
+
+    if not restated.strip():
         return _fail(
             "acceptance_drift",
             "task derailment",
-            f"{node.id} verified against a restatement sharing only {overlap:.0%} of the original",
+            f"{node.id}: verifier restated nothing, so there is no evidence it read "
+            "the original criterion",
         )
-    return _ok("acceptance_drift", "task derailment", f"{node.id} overlap {overlap:.0%}")
+
+    fidelity = restatement_fidelity(original, restated, cfg)
+    overlap = _word_overlap(original, restated)
+
+    if fidelity < DRIFT_THRESHOLD:
+        return _fail(
+            "acceptance_drift",
+            "task derailment",
+            f"{node.id} was verified against a restatement with fidelity {fidelity:.2f} "
+            f"(< {DRIFT_THRESHOLD:.2f}, word overlap {overlap:.0%}): {restated[:120]!r}",
+        )
+
+    return _ok(
+        "acceptance_drift",
+        "task derailment",
+        f"{node.id} fidelity {fidelity:.2f}, word overlap {overlap:.0%}",
+    )
 
 
 def decision_surface(receipt: Receipt) -> GateResult:
