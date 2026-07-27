@@ -65,7 +65,9 @@ Stolen outright from Omnigent's `Polly` example agent, and it is the single high
 
 The [MAST taxonomy](https://arxiv.org/abs/2503.13657) (NeurIPS 2025, 14 failure modes from 200 traces across 7 frameworks, κ=0.88) puts **task verification** as one of three top-level failure categories, and finds 79% of multi-agent failures trace to specification and coordination rather than model capability.
 
-So verification is not an instruction appended to a worker prompt. It is a distinct DAG node with its own budget, its own model, and a machine-checkable exit condition — tests pass, schema validates, build succeeds. `docs/MAST-GATES.md` maps all 14 modes to a concrete gate in `gates.py`. Unmapped modes are listed as unmapped rather than quietly ignored.
+So verification is not an instruction appended to a worker prompt. It is a distinct DAG node with its own budget, its own model, and a machine-checkable exit condition — tests pass, schema validates, build succeeds. [`docs/MAST-GATES.md`](docs/MAST-GATES.md) maps all 14 modes, plus two failures MAST does not name, to a concrete gate.
+
+That mapping is **measured, not asserted**. [`docs/MAST-COVERAGE.md`](docs/MAST-COVERAGE.md) is generated from the traces in `tests/mast/`, and every trace is run through the real gate. Each mode needs a trace the gate blocks *and* a trace it lets through — a gate that rejects everything covers nothing — and a mode added to the table without a trace fails CI.
 
 ### 4. Memory is read from Ruflo, work is never dispatched to it
 
@@ -87,18 +89,33 @@ Every task node runs through Omnigent, which means `bwrap` on Linux and `seatbel
 
 ```
 overmind/
-├── router.py        vendor-diversity routing + harness selection
-├── linearity.py     the independence analysis from decision 1
-├── gates.py         MAST-derived gates
-├── memory.py        Ruflo MCP client, allowlisted
-├── executor.py      Omnigent dispatch
-├── receipts.py      append-only run ledger, replayable
-└── cli.py           overmind run "goal"
-bridge/planner.ts    thin service exposing OMA's coordinator
-agents/*.yaml        Omnigent agent definitions (declarative)
+├── models.py         plan + receipt shapes; the contract between every layer
+├── config.py         overmind.toml, including the vendor-diversity requirement
+├── planner.py        bridge client; rejects an invalid plan by field path
+├── linearity.py      the independence analysis from decision 1
+├── router.py         vendor-diversity routing + harness selection + budgets
+├── agentspec.py      generates Omnigent agent YAML per node
+├── policy_export.py  compiles gates into in-session Omnigent policies
+├── policies/         the policy handlers those specs point at
+├── executor.py       Omnigent dispatch, one worktree per node
+├── introspect.py     reads actual writes out of git; re-proves disjointness
+├── semantic.py       embedding/n-gram similarity for loop + drift detection
+├── gates.py          MAST-derived gates
+├── integrate.py      merges the run's branches, or rolls the base back
+├── resume.py         checkpoint reconstruction for a halted run
+├── receipts.py       append-only run ledger, replayable
+├── memory.py         Ruflo MCP client, allowlisted
+├── otel.py           receipts → OTLP spans
+└── cli.py            plan / run / resume / replay / export / doctor / version
+bridge/planner.ts     thin service exposing OMA's coordinator
+bridge/schema.ts      plan validation at the boundary; no silent repair
+agents/*.yaml         Omnigent agent definitions (declarative)
+tests/mast/           failure-mode traces behind docs/MAST-COVERAGE.md
 ```
 
-Roughly 900 lines of Python and 100 of TypeScript. It is small on purpose. Every line that could be an upstream dependency is one.
+Still small on purpose: every line that could be an upstream dependency is one. There is no orchestration engine, agent loop, memory store, or sandbox in here. What there is, is the composition and the gates — and the gates are where most of the code went, because none of the three upstreams enforces them.
+
+Design and delivery record: [`docs/DESIGN.md`](docs/DESIGN.md), [`docs/TASKS.md`](docs/TASKS.md), [`docs/DECISIONS.md`](docs/DECISIONS.md) (ADR-001 … ADR-010), and the per-upstream studies in [`docs/upstream/`](docs/upstream/).
 
 ## Install
 
@@ -110,23 +127,48 @@ overmind doctor
 
 `make setup` installs upstreams from their own registries — `uv tool install omnigent`, `npx ruflo@latest`, `npm install @open-multi-agent/core`. Overmind vendors nothing and forks nothing, so upstream updates are `make update`.
 
+Prefer containers for the bridge:
+
+```bash
+cp .env.example .env     # add the provider key that plans
+make dev-up              # bridge on 7801, Jaeger on 16686
+```
+
+Omnigent and Ruflo deliberately stay on the host — one needs the real worktree and your credentials, the other is a stdio subprocess. [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) explains what runs where and why.
+
 ## Use
 
 ```bash
-# plan only — prints the DAG, the parallelism decisions, and the cost estimate
+# free: shows the exact request the coordinator would receive, no model call
+overmind plan "Add OAuth2 device flow to the auth service" --dry-run
+
+# plan only — prints the DAG, the parallelism decisions, and the gate results
 overmind plan "Add OAuth2 device flow to the auth service"
 
-# plan, approve, execute
+# plan, gate, approve, execute, integrate
 overmind run "Add OAuth2 device flow to the auth service" --budget 8.00
+
+# continue a halted run from its last good checkpoint
+overmind resume <run-id>
 
 # replay a previous run from its receipts, no model calls
 overmind replay <run-id>
+
+# send the run to any OTLP backend as one trace per run, one span per node
+overmind export <run-id> --otlp http://127.0.0.1:4318
+
+# what is actually installed, since the upstreams float on purpose
+overmind version
 ```
 
 ## Honest limitations
 
-- **Upstream churn is the main risk.** Ruflo shipped 1,488 releases and averages an alpha every few days. Adapters are pinned and contract-tested in CI; expect breakage anyway.
-- **The linearity gate depends on the planner declaring file sets honestly.** If it under-declares `writes`, two agents will collide. `gates.py` catches this after the fact via receipts, not before.
+The full list, each entry with what would fix it, is in [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md). The ones worth knowing before you clone:
+
+- **Upstream churn is the main risk, and the upstreams are not pinned.** Omnigent installs as latest and Ruflo runs via `npx ruflo@latest`, deliberately — Omnigent is alpha and pinning would mean running an older sandbox on purpose. Neither side has a lockfile. What exists instead is a blocking contract-test job that asserts the exact surfaces this repo calls and distinguishes *unreachable* (skip) from *changed* (fail). See [`docs/PINS.md`](docs/PINS.md).
+- **Parallelism is scheduled from declared file sets, then checked against measured ones.** The rewriter has to decide before any code runs, so it uses the planner's declared `writes`. Afterwards the real writes are read out of git: `declared_scope` fails any undeclared path, and `prove_disjoint` re-asks the disjointness question of the measured sets. The residual risk is narrow and real — the *first* run that mis-declares a path can still have two sessions collide. That run fails at its gates instead of shipping, and the corrected path goes to memory.
+- **Some gates are detective, not preventive.** Whatever can be decided from a single tool call runs as an in-session Omnigent policy and is denied before it happens (ADR-009). `decision_surface` and `action_trace` need the whole node, so they catch a failure before it reaches the base branch but after the tokens are spent.
+- **Span durations from `overmind export` are derived, not measured.** A receipt records when it was written and has no start timestamp, so a node's span runs from the previous ledger entry to its own. Every span says so via `overmind.timing.source`. Read the shape and the costs; do not read the milliseconds as latency.
 - **Cross-vendor review needs two credentials.** With one vendor configured, Overmind refuses to run rather than silently degrading to same-vendor review.
 - **This does not make agents smarter.** It removes coordination failures, which the MAST data says are 79% of the problem. The remaining 21% is model capability and no amount of orchestration touches it.
 
