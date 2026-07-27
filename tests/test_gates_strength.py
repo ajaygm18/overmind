@@ -79,6 +79,18 @@ def test_detail_reports_both_measures_so_a_bad_threshold_is_visible() -> None:
     assert "word overlap" in detail
 
 
+def test_passing_detail_names_the_measure_that_produced_the_score() -> None:
+    """0.61 from n-grams and 0.61 from embeddings do not mean the same thing."""
+    detail = gates.acceptance_drift(node(), node().acceptance).detail
+    assert "via ngram" in detail
+
+
+def test_failing_detail_also_names_the_measure() -> None:
+    """The two paths format separately; both must stay honest."""
+    detail = gates.acceptance_drift(node(), "the CSS renders correctly on mobile").detail
+    assert "via ngram" in detail
+
+
 def test_verifier_that_restated_nothing_fails() -> None:
     assert gates.acceptance_drift(node(), "   ").status is GateStatus.FAIL
 
