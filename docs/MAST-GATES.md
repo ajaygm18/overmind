@@ -35,7 +35,15 @@ Each mode below maps to a gate in `overmind/gates.py`, or is explicitly marked u
 
 ## Coverage
 
-14 of 14 modes mapped. Honest caveats about the mappings:
+14 of 14 modes mapped, plus the two beyond-MAST failures below.
+
+That is enforced, not asserted. [MAST-COVERAGE.md](MAST-COVERAGE.md) is generated
+from the traces in [`../tests/mast/`](../tests/mast/), and
+`tests/test_mast_coverage.py` runs every trace through the real gate. A mode in
+the tables above with no trace fails the suite, as does a mode with traces in
+only one direction — a gate that rejects everything covers nothing.
+
+Honest caveats about the mappings:
 
 - `decision_surface` and `action_trace` are **detective, not preventive** — they catch the failure in the receipt after the fact rather than stopping it. Preventing them requires reading intent, which is not solvable at the orchestration layer.
 - `ambiguity_halt` uses a model-scored threshold, so it inherits the scorer's calibration error. It will halt on some clear goals and pass some ambiguous ones.
