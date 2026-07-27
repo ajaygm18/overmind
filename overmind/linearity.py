@@ -169,7 +169,8 @@ def validate(plan: Plan) -> None:
             raise PlanInvalid(f"node {node.id!r} uses command_exit_zero with no command")
 
 
-class RewriteReport(BaseException if False else object):  # noqa: N818 - plain data holder
+@dataclass
+class RewriteReport:  # noqa: N818 - plain data holder
     def __init__(self, serialized: int, capped: int, verifiers: int, levels: list[list[str]]):
         self.serialized = serialized
         self.capped = capped
