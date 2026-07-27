@@ -181,11 +181,12 @@ def test_int_attributes_are_strings_and_floats_are_not() -> None:
 
 def test_empty_attributes_are_omitted_not_blanked() -> None:
     """`vendor=""` would read as 'the router assigned nothing'."""
-    span = next(s for s in spans_of(otel.to_otlp(LEDGER)) if s["name"] == "gate.plan") if False else None
     minimal = spans_of(otel.to_otlp([receipt("bare", offset=0)]))
     node = next(s for s in minimal if s["name"] == "node.bare")
-    assert "overmind.vendor" not in attrs_of(node)
-    assert span is None
+    attributes = attrs_of(node)
+    assert "overmind.vendor" not in attributes
+    assert "overmind.harness" not in attributes
+    assert "overmind.diff_stat" not in attributes
 
 
 def test_an_empty_ledger_produces_no_spans() -> None:
@@ -244,7 +245,8 @@ def test_a_failed_node_fails_the_run_span() -> None:
 
 def test_a_skipped_node_is_unset_rather_than_ok() -> None:
     """Skipped work is not success. Reporting OK would inflate a run's health."""
-    span = spans_of(otel.to_otlp([receipt("skipped-node", offset=0, status="skipped")]))[1]
+    spans = spans_of(otel.to_otlp([receipt("skipped-node", offset=0, status="skipped")]))
+    span = next(s for s in spans if s["name"] == "node.skipped-node")
     assert span["status"]["code"] == otel.STATUS_UNSET
 
 
