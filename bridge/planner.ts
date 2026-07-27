@@ -3,27 +3,34 @@
  *
  * This is the whole TypeScript surface of the project. It does not plan --
  * @open-multi-agent/core plans. It translates one goal into OMA's dynamic
- * task-DAG planning and normalises the result into the shape overmind/models.py
- * validates.
+ * task-DAG planning and hands back a plan that overmind/models.py can validate.
  *
  * Everything Overmind adds to the plan (verification interleaving, conflict
- * serialization, vendor routing) happens on the Python side, deliberately:
- * the rewrite must be independent of whichever planner produced the DAG.
+ * serialization, vendor routing) happens on the Python side, deliberately: the
+ * rewrite must be independent of whichever planner produced the DAG.
+ *
+ * What this file no longer does is repair the coordinator's output. See
+ * schema.ts: bad plans are rejected with field paths, retried once with those
+ * paths fed back, and then refused with 422.
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { OpenMultiAgent } from '@open-multi-agent/core'
+import {
+  describeIssues,
+  validatePlan,
+  type TaskNode,
+  type ValidationIssue,
+} from './schema.js'
 
 const PORT = Number(process.env.OVERMIND_BRIDGE_PORT ?? 7801)
 const MODEL = process.env.OVERMIND_PLANNER_MODEL ?? 'gpt-5.4'
 const PROVIDER = process.env.OVERMIND_PLANNER_PROVIDER ?? 'openai'
 
-type ExitKind =
-  | 'tests_pass'
-  | 'build_succeeds'
-  | 'schema_valid'
-  | 'command_exit_zero'
-  | 'diff_nonempty'
+/** One. A model that omitted a field usually supplies it when told which field;
+ *  a model that fails twice has a prompt or capability problem, and retrying it
+ *  burns tokens to arrive at the same 422. */
+const MAX_ATTEMPTS = 2
 
 interface PlanRequest {
   goal: string
@@ -32,15 +39,20 @@ interface PlanRequest {
   max_parallel_hint?: number
 }
 
-interface TaskNode {
-  id: string
-  role: string
-  intent: string
-  acceptance: string
-  reads: string[]
-  writes: string[]
-  depends_on: string[]
-  exit_check: { kind: ExitKind; command?: string }
+interface PlanResponse {
+  nodes: TaskNode[]
+  ambiguity: number
+  attempts: number
+}
+
+class PlanInvalid extends Error {
+  constructor(
+    readonly issues: ValidationIssue[],
+    readonly attempts: number,
+  ) {
+    super(`plan failed validation after ${attempts} attempt(s)`)
+    this.name = 'PlanInvalid'
+  }
 }
 
 const oma = new OpenMultiAgent({ defaultProvider: PROVIDER, defaultModel: MODEL })
@@ -57,57 +69,6 @@ function priorBlock(prior: string[]): string {
     lines,
     '',
   ].join('\n')
-}
-
-function slug(value: unknown, fallback: string): string {
-  const raw = typeof value === 'string' && value.trim() ? value : fallback
-  return raw
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 48) || fallback
-}
-
-function paths(value: unknown): string[] {
-  if (!Array.isArray(value)) return []
-  return [...new Set(value.filter((v): v is string => typeof v === 'string' && v.length > 0))].sort()
-}
-
-const VALID_EXITS = new Set<ExitKind>([
-  'tests_pass',
-  'build_succeeds',
-  'schema_valid',
-  'command_exit_zero',
-  'diff_nonempty',
-])
-
-/**
- * Normalise one coordinator task.
- *
- * A missing or unrecognised exit kind becomes tests_pass rather than being
- * passed through: the Python validator rejects non-machine-checkable exits and
- * failing here with a clear default is cheaper than failing there.
- */
-function normalise(raw: Record<string, unknown>, index: number): TaskNode {
-  const rawExit = (raw.exit_check ?? {}) as { kind?: string; command?: string }
-  const kind = VALID_EXITS.has(rawExit.kind as ExitKind)
-    ? (rawExit.kind as ExitKind)
-    : 'tests_pass'
-
-  const writes = paths(raw.writes)
-  return {
-    id: slug(raw.id, `task-${index + 1}`),
-    role: typeof raw.role === 'string' ? raw.role : 'implementer',
-    intent: String(raw.intent ?? raw.description ?? '').trim(),
-    acceptance: String(raw.acceptance ?? '').trim(),
-    reads: paths(raw.reads),
-    writes,
-    depends_on: paths(raw.depends_on).map((d) => slug(d, d)),
-    exit_check:
-      kind === 'command_exit_zero' && !rawExit.command
-        ? { kind: 'tests_pass' }
-        : { kind, command: rawExit.command },
-  }
 }
 
 /** Pull the task array out of the coordinator output without assuming one shape. */
@@ -135,33 +96,60 @@ function ambiguityOf(output: unknown): number {
   return Number.isFinite(value) ? Math.min(Math.max(value, 0), 1) : 0
 }
 
-async function buildPlan(req: PlanRequest): Promise<{ nodes: TaskNode[]; ambiguity: number }> {
+function systemPrompt(req: PlanRequest, correction: string): string {
+  return [
+    'You decompose one engineering goal into a task DAG. You write no code.',
+    req.contract,
+    priorBlock(req.prior_decisions ?? []),
+    `Aim for at most ${req.max_parallel_hint ?? 3} concurrent tasks.`,
+    'Reply with a single JSON object: {"tasks": [...], "ambiguity": <0..1>}.',
+    correction,
+  ]
+    .filter((part) => part.length > 0)
+    .join('\n\n')
+}
+
+function correctionBlock(issues: ValidationIssue[]): string {
+  return [
+    'YOUR PREVIOUS REPLY WAS REJECTED. Fix exactly these fields and reply again',
+    'with the complete task list. Do not drop the tasks that were fine.',
+    describeIssues(issues),
+  ].join('\n')
+}
+
+async function attempt(req: PlanRequest, correction: string) {
   const team = oma.createTeam('overmind-planning', {
     name: 'overmind-planning',
-    agents: [
-      {
-        name: 'coordinator',
-        systemPrompt: [
-          'You decompose one engineering goal into a task DAG. You write no code.',
-          req.contract,
-          priorBlock(req.prior_decisions ?? []),
-          `Aim for at most ${req.max_parallel_hint ?? 3} concurrent tasks.`,
-          'Reply with a single JSON object: {"tasks": [...], "ambiguity": <0..1>}.',
-        ].join('\n\n'),
-      },
-    ],
+    agents: [{ name: 'coordinator', systemPrompt: systemPrompt(req, correction) }],
     sharedMemory: true,
   })
 
   const result = await oma.runTeam(team, req.goal)
   const output = result.agentResults.get('coordinator')?.output
-  const tasks = extractTasks(output)
+  return { validated: validatePlan(extractTasks(output)), ambiguity: ambiguityOf(output) }
+}
 
-  if (tasks.length === 0) {
-    throw new Error('coordinator returned no parseable tasks')
+async function buildPlan(req: PlanRequest): Promise<PlanResponse> {
+  let correction = ''
+  let issues: ValidationIssue[] = []
+
+  for (let n = 1; n <= MAX_ATTEMPTS; n += 1) {
+    const { validated, ambiguity } = await attempt(req, correction)
+
+    if (validated.issues.length === 0) {
+      return { nodes: validated.nodes, ambiguity, attempts: n }
+    }
+
+    issues = validated.issues
+    correction = correctionBlock(issues)
+    process.stdout.write(
+      `attempt ${n} rejected:\n${describeIssues(issues)}\n${
+        n < MAX_ATTEMPTS ? 'retrying once with the errors fed back\n' : ''
+      }`,
+    )
   }
 
-  return { nodes: tasks.map(normalise), ambiguity: ambiguityOf(output) }
+  throw new PlanInvalid(issues, MAX_ATTEMPTS)
 }
 
 function body(req: IncomingMessage): Promise<string> {
@@ -201,6 +189,16 @@ const server = createServer(async (req, res) => {
     }
     json(res, 200, await buildPlan(parsed))
   } catch (error) {
+    // 422, not 500: the service worked, the plan is unacceptable. The client
+    // distinguishes these, and so should anyone reading the log.
+    if (error instanceof PlanInvalid) {
+      json(res, 422, {
+        error: error.message,
+        attempts: error.attempts,
+        issues: error.issues,
+      })
+      return
+    }
     json(res, 500, { error: error instanceof Error ? error.message : String(error) })
   }
 })
