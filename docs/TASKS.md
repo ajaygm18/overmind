@@ -18,7 +18,7 @@ Status keys: `todo` · `doing` · `done` · `blocked`
 | T07 | Upstream contract tests that actually assert | T02 | `done` |
 | T08 | Bridge robustness and plan schema validation | — | `done` |
 | T09 | Failure-mode evaluation harness | T01, T05 | `done` |
-| T10 | Receipt → OpenTelemetry export | — | `todo` |
+| T10 | Receipt → OpenTelemetry export | — | `done` |
 | T11 | Reproducible dev environment | T02 | `todo` |
 | T12 | Release readiness: pins, packaging, quickstart | all | `todo` |
 
@@ -90,6 +90,23 @@ worse than one marked `blocked`.
   equality, and it runs only on blocking results: several gates leave
   `mast_mode` empty on PASS, which is right, since there is no failure to
   classify.
+- **T10, no OpenTelemetry SDK.** The spec assumed the SDK. OTLP/JSON is a
+  documented wire shape and `httpx` is already a dependency, so `otel.py` builds
+  the payload directly. Pulling in a tracer provider, span processor, exporter,
+  and context propagation to POST data that is already complete and at rest
+  would be a large dependency for no capability.
+- **T10, durations are derived and say so.** `Receipt` has `at` — when the entry
+  was appended — and no start timestamp, so a node's span runs from the previous
+  ledger entry to its own. That approximates wall time; it does not measure it.
+  Every span carries `overmind.timing.source="derived-from-ledger-order"`, the
+  CLI prints the same caveat, and a test asserts the attribute is present.
+  **The real fix is a `started_at` field on `Receipt`; until then this is a
+  limitation and belongs in `docs/LIMITATIONS.md` (T12), not a solved item.**
+- **T10, tool arguments are never exported.** Ledger redaction is opt-in
+  (`ReceiptConfig.redact_tool_args`), so a receipt on disk may hold a secret an
+  operator chose not to scrub locally. Spans go to third-party backends, so only
+  tool names and counts leave the machine. A test greps a rendered payload for a
+  fixture secret.
 - **T05, `LEFT DIRTY` path.** Subtask 7 (simulate a rollback failure) is not
   covered. Forcing `git reset --hard` to fail requires making the object store
   unwritable mid-merge, which is platform-specific enough to be its own
