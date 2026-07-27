@@ -15,6 +15,10 @@ When Ruflo is unavailable there is a pure-Python fallback over character
 n-grams. It is weaker, and it is deliberately weaker in the safe direction:
 surface-similar rephrasings still get caught, and CI runs the whole gate with
 no model, no network, and no upstream process.
+
+Every public function here reports which measure produced its number. A gate
+that says 0.61 without saying how it got 0.61 invites the reader to trust an
+n-gram score as though embeddings had produced it.
 """
 
 from __future__ import annotations
@@ -219,15 +223,35 @@ def loop_detect_semantic(
     )
 
 
-def restatement_fidelity(original: str, restated: str, cfg: MemoryConfig | None = None) -> float:
-    """How faithfully a verifier restated the acceptance criterion.
+def restatement_fidelity_measured(
+    original: str, restated: str, cfg: MemoryConfig | None = None
+) -> tuple[float, str]:
+    """How faithfully a verifier restated the acceptance criterion, and how measured.
 
     The original `acceptance_drift` gate used word overlap, which punishes a
     faithful paraphrase and rewards one that parrots the words while checking
     something else. Similarity over meaning is the right measure here.
+
+    The source is returned rather than inferred by the caller because the two
+    measures do not share a scale: 0.61 from embeddings and 0.61 from n-grams
+    mean different things, and a gate that reports only the number invites the
+    reader to treat the weaker one as the stronger.
+
+    Returns `(0.0, "ngram")` when either side is empty -- no measurement was
+    taken, and claiming an embedding source for a number that never touched one
+    would be the exact dishonesty this signature exists to prevent.
     """
     texts = [original.strip().lower(), restated.strip().lower()]
     if not texts[0] or not texts[1]:
-        return 0.0
+        return 0.0, "ngram"
     sim = Similarity.build(texts, cfg)
-    return round(sim.between(0, 1, texts), 3)
+    return round(sim.between(0, 1, texts), 3), sim.source
+
+
+def restatement_fidelity(original: str, restated: str, cfg: MemoryConfig | None = None) -> float:
+    """Fidelity alone, for callers that do not report provenance.
+
+    Delegates so the measure has exactly one implementation.
+    """
+    score, _source = restatement_fidelity_measured(original, restated, cfg)
+    return score

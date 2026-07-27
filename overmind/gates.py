@@ -26,7 +26,7 @@ from collections.abc import Iterable
 
 from .config import MemoryConfig
 from .models import GateResult, GateStatus, Plan, Receipt, Role, TaskNode
-from .semantic import restatement_fidelity
+from .semantic import restatement_fidelity_measured
 
 _REJECTION = re.compile(r"\b(reject|won'?t fix|out of scope|disagree|not applicable)\b", re.I)
 _VERDICT = re.compile(r"^\s*(pass|fail)\b", re.I)
@@ -60,6 +60,7 @@ def _halt(gate: str, mode: str, detail: str) -> GateResult:
 
 
 def _word_overlap(original: str, restated: str) -> float:
+    """Second opinion only. Never load-bearing; see `acceptance_drift`."""
     left = set(_WORD.findall(original.lower()))
     right = set(_WORD.findall(restated.lower()))
     return len(left & right) / len(left) if left else 0.0
@@ -196,10 +197,10 @@ def context_carry(plan: Plan) -> list[GateResult]:
         for other in plan.nodes:
             if other.id == node.id or not node.conflicts_with(other):
                 continue
-            pair = tuple(sorted((node.id, other.id)))
+            pair = (min(node.id, other.id), max(node.id, other.id))
             if pair in seen_pairs:
                 continue
-            seen_pairs.add(pair)  # type: ignore[arg-type]
+            seen_pairs.add(pair)
 
             ordered = other.id in closure[node.id] or node.id in closure[other.id]
             if not ordered:
@@ -313,6 +314,10 @@ def spec_conformance(node: TaskNode, verdict: str) -> GateResult:
     verifier was asked whether the acceptance criterion is met, and a one-word
     answer is a vote rather than a finding. Treating either as success is how a
     verification step becomes a formality.
+
+    Deliberately does not re-check exit codes or declared-vs-actual writes.
+    `exit_proof` and `action_trace` own those, and a single failure reported by
+    three gates reads as three problems.
     """
     text = verdict.strip()
     match = _VERDICT.match(text)
@@ -354,8 +359,12 @@ def acceptance_drift(
     The measure is similarity of meaning, not shared vocabulary. Word overlap
     scored 'the login endpoint returns 200' against 'auth works' as total drift
     while scoring a restatement that reuses the words and checks something else
-    as perfect fidelity, which inverts the gate's purpose. Both numbers are
-    reported so that a threshold set wrongly is visible in the receipt.
+    as perfect fidelity, which inverts the gate's purpose.
+
+    `detail` reports the fidelity, the measure that produced it, and word
+    overlap as a second opinion. Overlap is never load-bearing: the fallback
+    from embeddings to n-grams happens inside `restatement_fidelity_measured`,
+    so there is no measure-unavailable branch here to hide.
     """
     original = node.acceptance.strip()
     if not original:
@@ -369,7 +378,7 @@ def acceptance_drift(
             "the original criterion",
         )
 
-    fidelity = restatement_fidelity(original, restated, cfg)
+    fidelity, source = restatement_fidelity_measured(original, restated, cfg)
     overlap = _word_overlap(original, restated)
 
     if fidelity < DRIFT_THRESHOLD:
@@ -377,13 +386,14 @@ def acceptance_drift(
             "acceptance_drift",
             "task derailment",
             f"{node.id} was verified against a restatement with fidelity {fidelity:.2f} "
-            f"(< {DRIFT_THRESHOLD:.2f}, word overlap {overlap:.0%}): {restated[:120]!r}",
+            f"(< {DRIFT_THRESHOLD:.2f}, measured via {source}, word overlap "
+            f"{overlap:.0%}): {restated[:120]!r}",
         )
 
     return _ok(
         "acceptance_drift",
         "task derailment",
-        f"{node.id} fidelity {fidelity:.2f}, word overlap {overlap:.0%}",
+        f"{node.id} fidelity {fidelity:.2f} via {source}, word overlap {overlap:.0%}",
     )
 
 
