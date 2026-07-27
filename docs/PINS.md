@@ -59,7 +59,7 @@ These are the ones ADR-001 is really about, and they float deliberately.
 |---|---|---|
 | Omnigent | `uv tool install --python 3.12 omnigent` | No — latest |
 | Ruflo | `npx ruflo@latest mcp start` | No — latest, per invocation |
-| OMA | `@open-multi-abgent/core` via the bridge | Caret range |
+| OMA | `@open-multi-agent/core` via the bridge | Caret range |
 
 Floating is a choice, not an oversight. Omnigent is alpha and its sandbox
 hardening is the main reason to compose it; pinning would mean deliberately
@@ -71,9 +71,6 @@ The cost is that an upstream can change under a working checkout. That is what
 `tests/contracts/` is for: it asserts the specific surfaces this repo calls, and
 it distinguishes *unreachable* (skip) from *changed* (fail), so drift is a red
 build rather than a mystery at runtime.
-
-**Typo above is not a typo you should copy** — the package is
-`@open-multi-agent/core`; see `bridge/package.json` for the authoritative string.
 
 ## Development containers
 
