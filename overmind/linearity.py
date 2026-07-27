@@ -16,6 +16,7 @@ work at ~15x the tokens, so independence is measured here rather than assumed.
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass, field
 
 from .models import ExitCheck, ExitKind, Plan, Role, TaskNode
 
@@ -170,12 +171,13 @@ def validate(plan: Plan) -> None:
 
 
 @dataclass
-class RewriteReport:  # noqa: N818 - plain data holder
-    def __init__(self, serialized: int, capped: int, verifiers: int, levels: list[list[str]]):
-        self.serialized = serialized
-        self.capped = capped
-        self.verifiers = verifiers
-        self.levels = levels
+class RewriteReport:
+    """What the rewrite changed. Printed by `overmind plan`, asserted in tests."""
+
+    serialized: int = 0
+    capped: int = 0
+    verifiers: int = 0
+    levels: list[list[str]] = field(default_factory=list)
 
     @property
     def widest(self) -> int:
