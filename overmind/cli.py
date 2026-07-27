@@ -11,7 +11,18 @@ from rich.console import Console
 from rich.table import Table
 
 from . import config as config_mod
-from . import executor, gates, linearity, planner, receipts, router
+from . import (
+    executor,
+    gates,
+    introspect,
+    linearity,
+    planner,
+    receipts,
+    router,
+    semantic,
+)
+from . import integrate as integrate_mod
+from . import resume as resume_mod
 from .memory import MemoryUnavailable, RufloMemory
 from .models import GateStatus, Plan
 
@@ -125,6 +136,10 @@ def run(
         console.print("[red]plan gates blocked execution. nothing was spent.[/red]")
         raise typer.Exit(1)
 
+    # Snapshot before spending. Receipts record what happened; only the
+    # snapshot records what was supposed to happen, and resume needs both.
+    resume_mod.save_plan(p, run_id)
+
     if not yes and not typer.confirm(f"execute {len(p.nodes)} nodes at up to ${cfg.run.budget_usd:.2f}?"):
         raise typer.Exit(0)
 
@@ -145,6 +160,7 @@ def _execute(
     run_id: str,
     plan_hash: str,
     ledger: receipts.Ledger,
+    levels: list[list[str]] | None = None,
 ) -> bool:
     """Execute levels in order. Returns True if the run halted.
 
@@ -152,8 +168,9 @@ def _execute(
     resumable rather than dying mid-diff.
     """
     router.audit(p)  # re-check vendor diversity right before spending
+    audits: dict[str, introspect.WriteAudit] = {}
 
-    for depth, level in enumerate(p.levels):
+    for depth, level in enumerate(levels if levels is not None else p.levels):
         for node_id in level:
             node = p.node(node_id)
 
@@ -167,11 +184,19 @@ def _execute(
             outcome = executor.execute(node, cfg, run_id)
             receipt = executor.to_receipt(run_id, plan_hash, node, outcome)
 
+            # Writes are measured from git here, not taken from the plan.
+            audit = introspect.audit_writes(node, outcome.worktree)
+            audits[node_id] = audit
+
             node_gates = [
-                gates.loop_detect(receipt),
                 gates.exit_proof(node, outcome.exit_code),
                 gates.decision_surface(receipt),
                 gates.action_trace(node, receipt),
+                # Measured scope, so an under-reporting harness cannot hide it.
+                introspect.declared_scope(audit),
+                # Subsumes the old exact-match loop_detect: byte-identical
+                # calls score 1.0, and rephrased repeats now score too.
+                semantic.loop_detect_semantic(receipt, cfg=cfg.memory),
             ]
             receipt.gates = node_gates
             ledger.append(receipt)
@@ -190,6 +215,54 @@ def _execute(
                 console.print(f"  [red]{outcome.error or 'node failed'}[/red]")
                 return True
 
+    # The rewriter authorised concurrency from declared file sets. Now that the
+    # real ones are known, re-prove it.
+    disjoint = introspect.prove_disjoint(p, audits)
+    ledger.append_gates(plan_hash, "__disjoint__", disjoint)
+    if not _report_gates(disjoint):
+        for g in disjoint:
+            if g.blocking:
+                _remember_failure(cfg, run_id, "__disjoint__", g.mast_mode or g.gate, g.detail)
+        return True
+
+    # Under-declaration is a planning defect. Teach it, so the next plan for
+    # this repository declares the path and the rewriter can trust it.
+    for node_id, audit in audits.items():
+        if (note := introspect.lesson(audit)) is not None:
+            _remember(cfg, run_id, node_id, note)
+
+    return _integrate(p, cfg, run_id, plan_hash, ledger)
+
+
+def _integrate(
+    p: Plan,
+    cfg: config_mod.Config,
+    run_id: str,
+    plan_hash: str,
+    ledger: receipts.Ledger,
+) -> bool:
+    """Merge the run's worktrees into the base branch. True if it halted.
+
+    Without this the parallelism was decorative: nodes finished, gates passed,
+    and the work stayed on branches nobody merged.
+    """
+    try:
+        report = integrate_mod.integrate(p, run_id, ledger.read())
+    except integrate_mod.IntegrationError as exc:
+        console.print(f"[red]integration refused:[/red] {exc}")
+        return True
+
+    result = integrate_mod.clean_merge(report)
+    ledger.append_gates(plan_hash, "__integrate__", [result])
+
+    if result.blocking:
+        console.print(f"[red]{result.gate}[/red] ({result.mast_mode}): {result.detail}")
+        _remember_failure(
+            cfg, run_id, "__integrate__", result.mast_mode or result.gate, result.detail
+        )
+        return True
+
+    console.print(f"[green]{report.summary()}[/green]")
     return False
 
 
@@ -209,6 +282,90 @@ def _remember_failure(
             mem.record_failure(run_id, node_id, mode, detail)
     except MemoryUnavailable:
         pass
+
+
+def _recall(cfg: config_mod.Config, query: str) -> list[str]:
+    try:
+        with RufloMemory(cfg.memory) as mem:
+            return mem.recall(query)
+    except MemoryUnavailable:
+        return []
+
+
+@app.command()
+def resume(
+    run_id: str,
+    config: Path = typer.Option(Path("overmind.toml"), "--config"),
+    budget: float | None = typer.Option(None, "--budget", help="extend the original budget"),
+    yes: bool = typer.Option(False, "--yes"),
+) -> None:
+    """Continue a halted run from its last good checkpoint."""
+    cfg = _load(config)
+    if missing := executor.preflight():
+        console.print(f"[red]missing required tools:[/red] {missing}")
+        raise typer.Exit(2)
+
+    try:
+        point = resume_mod.plan_resume(run_id, cfg.receipts)
+    except (resume_mod.ResumeError, FileNotFoundError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from exc
+
+    console.print(f"[bold]resume {run_id}[/bold] plan {point.plan_hash}")
+    console.print(point.summary())
+
+    if point.complete:
+        console.print("[green]nothing left to do[/green]")
+        raise typer.Exit(0)
+
+    # Amnesia is what makes resume dangerous, not bookkeeping. Re-seed the
+    # earlier half's decisions and confirm they can actually be read back;
+    # a resumed agent that cannot see them will re-decide them differently.
+    if point.prior_decisions and cfg.memory.enabled:
+        for decision in point.prior_decisions:
+            _remember(cfg, run_id, "__resume__", decision)
+        carried = _recall(cfg, point.plan.goal)
+        continuity = gates.checkpoint_continuity(point.prior_decisions, carried)
+        if continuity.blocking:
+            console.print(f"[red]{continuity.gate}[/red]: {continuity.detail}")
+            console.print("[red]refusing to resume without the prior context.[/red]")
+            raise typer.Exit(1)
+        console.print(f"[dim]carried {len(point.prior_decisions)} prior decision(s)[/dim]")
+    elif point.prior_decisions:
+        console.print(
+            f"[yellow]memory disabled: {len(point.prior_decisions)} prior decision(s) "
+            "cannot be carried forward. the resumed nodes may re-decide them.[/yellow]"
+        )
+
+    if budget is not None:
+        cfg.run.budget_usd = budget
+    remaining = point.budget_left(cfg.run.budget_usd)
+    console.print(f"[bold]budget left:[/bold] ${remaining:.2f}")
+    if remaining <= 0:
+        console.print("[red]original budget is spent. pass --budget to extend it.[/red]")
+        raise typer.Exit(1)
+
+    if not yes and not typer.confirm(f"resume {len(point.remaining)} node(s)?"):
+        raise typer.Exit(0)
+
+    ledger = receipts.Ledger(cfg.receipts, run_id)
+    router.route(point.plan, cfg)
+    router.distribute_budget(point.plan, cfg.run.budget_usd)
+
+    halted = _execute(
+        point.plan,
+        cfg,
+        run_id,
+        point.plan_hash,
+        ledger,
+        levels=point.remaining_levels,
+    )
+
+    console.print(json.dumps(receipts.summarize(ledger.read()), indent=2))
+    if halted:
+        console.print(f"[yellow]halted again. inspect with:[/yellow] overmind replay {run_id}")
+        raise typer.Exit(1)
+    console.print(f"[green]run {run_id} complete[/green]")
 
 
 @app.command()
