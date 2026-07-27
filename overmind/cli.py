@@ -50,7 +50,22 @@ def _build_plan(goal: str, cfg: config_mod.Config, wide: bool) -> tuple[Plan, fl
     if prior:
         console.print(f"[dim]recalled {len(prior)} prior decision(s) from memory[/dim]")
 
-    raw, ambiguity = planner.plan(goal, cfg, prior)
+    try:
+        raw, ambiguity = planner.plan(goal, cfg, prior)
+    except planner.PlanInvalid as exc:
+        # Ordered before PlanRejected, which it subclasses. The bridge already
+        # retried once with these errors fed back; retrying here would spend
+        # again to reach the same 422.
+        console.print("[red]the coordinator could not produce a valid plan.[/red]")
+        console.print(str(exc))
+        raise typer.Exit(1) from exc
+    except planner.PlannerUnavailable as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(2) from exc
+    except planner.PlanRejected as exc:
+        console.print(f"[red]plan rejected:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
     report = linearity.rewrite(raw, cfg.run.max_parallel, wide=wide)
     router.route(raw, cfg)
     router.distribute_budget(raw, cfg.run.budget_usd)
@@ -81,6 +96,34 @@ def _render(plan: Plan, ambiguity: float, summary: str) -> None:
     console.print("[dim]* inserted by the rewriter, not the planner[/dim]")
 
 
+def _dry_run(goal: str, cfg: config_mod.Config) -> None:
+    """Print the exact POST body, then stop. No model call, nothing spent.
+
+    The recalled decisions are the interesting part: they are injected as
+    constraints, so a stale or irrelevant recall is a common reason a plan comes
+    back wrong, and there was previously no way to look at them without paying
+    for a planning call.
+    """
+    prior = _recall(cfg, goal)
+    body = planner.payload(goal, cfg, prior)
+
+    console.print(f"[bold]POST[/bold] {cfg.bridge.url.rstrip('/')}/plan")
+    console.print(f"[dim]timeout {cfg.bridge.timeout_s}s, max_parallel_hint {cfg.run.max_parallel}[/dim]\n")
+    console.print(json.dumps(body, indent=2))
+
+    console.print(
+        f"\n[dim]{len(prior)} prior decision(s) would be injected as constraints[/dim]"
+        if prior
+        else "\n[dim]no prior decisions recalled; this plan starts cold[/dim]"
+    )
+
+    if planner.health(cfg):
+        console.print(f"[green]bridge is up at {cfg.bridge.url}[/green]")
+        return
+    console.print(f"[red]bridge is not reachable at {cfg.bridge.url}[/red] (run `make bridge`)")
+    raise typer.Exit(2)
+
+
 def _report_gates(results: list[gates.GateResult]) -> bool:
     """Print gate results. Returns True if execution may proceed."""
     blocking = [g for g in results if g.blocking]
@@ -98,9 +141,17 @@ def plan(
     goal: str,
     config: Path = typer.Option(Path("overmind.toml"), "--config"),
     wide: bool = typer.Option(False, "--wide", help="allow fan-out beyond max_parallel"),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="show the request the bridge would receive, then stop"
+    ),
 ) -> None:
     """Plan only. No execution, no spend."""
     cfg = _load(config)
+
+    if dry_run:
+        _dry_run(goal, cfg)
+        return
+
     p, ambiguity, summary = _build_plan(goal, cfg, wide)
     _render(p, ambiguity, summary)
     _report_gates(gates.plan_gates(p, ambiguity, cfg.run.ambiguity_threshold))
