@@ -1,0 +1,48 @@
+# Overmind run configuration.
+
+[run]
+# Serial by default. See ADR-003.
+max_parallel = 3
+# Hard ceiling per run in USD. Exceeding it halts at the last checkpoint
+# rather than failing mid-diff.
+budget_usd = 10.00
+# Ambiguity score above which the run halts for human clarification
+# (MAST: fail-to-ask-for-clarification).
+ambiguity_threshold = 0.65
+
+[vendors]
+# At least two are required. Cross-vendor review is not optional (ADR-004).
+# Vendor -> the Omnigent harness used to reach it.
+anthropic = "claude-sdk"
+openai = "codex"
+
+[roles]
+# Role -> preferred vendor. The router overrides these when it must satisfy
+# the reviewer-diversity constraint.
+planner = "anthropic"
+implementer = "anthropic"
+verifier = "openai"
+reviewer = "openai"
+
+[bridge]
+# The OMA coordinator, exposed as a local service by bridge/planner.ts.
+url = "http://127.0.0.1:7801"
+timeout_s = 180
+
+[memory]
+# Ruflo, reached over MCP. Only the allowlist in memory.py is callable.
+enabled = true
+command = ["npx", "ruflo@latest", "mcp", "start"]
+# Prior decisions injected into the planner prompt.
+recall_limit = 12
+
+[policies]
+# Passed through to Omnigent's policy engine. Overmind does not implement
+# policy evaluation itself.
+ask_on_shell = true
+max_tool_calls_per_session = 60
+
+[receipts]
+dir = ".overmind/receipts"
+# Receipts capture tool arguments, which can include secrets.
+redact_tool_args = false

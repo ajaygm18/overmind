@@ -1,0 +1,13 @@
+.overmind/
+.venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+node_modules/
+dist/
+build/
+*.egg-info/
+.env
+.worktrees/
