@@ -10,22 +10,30 @@ license = { text = "Apache-2.0" }
 # external processes (omnigent CLI, OMA bridge, ruflo MCP), not Python deps.
 # pyyaml is here because agent specs are YAML and Omnigent reads them; writing
 # YAML by hand-rolled serializer would be a bug factory for no benefit.
+#
+# Each requirement is bounded at the next major. Lower bounds alone are an
+# open invitation for a breaking release to land in a checkout nobody touched,
+# and this repo has no committed lockfile to catch it -- see docs/PINS.md.
+# Pydantic in particular is load-bearing: every model, gate input, and config
+# validator goes through it.
 dependencies = [
-    "pydantic>=2.9",
-    "httpx>=0.27",
-    "typer>=0.12",
-    "rich>=13.7",
-    "tomli-w>=1.0",
-    "pyyaml>=6.0",
+    "pydantic>=2.9,<3",
+    "httpx>=0.27,<1",
+    "typer>=0.12,<1",
+    "rich>=13.7,<15",
+    "tomli-w>=1.0,<2",
+    "pyyaml>=6.0,<7",
 ]
 
 [project.optional-dependencies]
+# Bounded for the same reason, and more tightly for the two that gate CI: a
+# ruff or mypy major can turn a green checkout red without a code change.
 dev = [
-    "pytest>=8.3",
-    "pytest-asyncio>=0.24",
-    "mypy>=1.11",
-    "ruff>=0.6",
-    "types-PyYAML>=6.0",
+    "pytest>=8.3,<9",
+    "pytest-asyncio>=0.24,<1",
+    "mypy>=1.11,<2",
+    "ruff>=0.6,<1",
+    "types-PyYAML>=6.0,<7",
 ]
 
 [project.scripts]
