@@ -144,6 +144,35 @@ worse than one marked `blocked`.
   PyPI account and a claimed name, which is not a code change and is not done
   here; `overmind version` reports `0.1.0 (from source, not installed)` when run
   from a checkout, which is the honest answer.
+- **Post-T12 remediation.** Writing a limitation down is not fixing it. Every
+  entry in `LIMITATIONS.md` that named a fix was attempted, in this order:
+  measured span timing (`Receipt.started_at`, set in `executor.execute` before
+  the worktree exists, exported as `measured-from-receipt` only when every node
+  in the ledger has it); `prove_disjoint` refusing an unpopulated `levels` and
+  an audited node that appears in no level; `[memory] require_embeddings`,
+  which turns the silent n-gram fallback into a gate failure in
+  `loop_detect_semantic` and `acceptance_drift` both; the rollback-failure
+  fixture; dependency bounds and exact bridge pins; and the ambiguity
+  calibration corpus. Each landed with tests. `LIMITATIONS.md` was then
+  rewritten to list only what is still open, with the closed items kept in a
+  final section so a reader of the earlier version can see where they went.
+- **Ambiguity calibration is half a fix, and says so.** `overmind/calibration.py`
+  and `tests/mast/ambiguity.jsonl` supply the corpus, the format, and a chooser
+  that maximises Youden's J; `tools/calibrate_ambiguity.py` exits non-zero
+  rather than printing a threshold when no scores exist. The scores cannot be
+  produced here — they are the planner's self-report and need a live
+  coordinator — so 0.65 still ships, labelled provisional in three places, and
+  a test asserts the corpus is still unscored so that the day it changes, CI
+  says so. Fabricating scores would have produced a calibrated-looking number
+  nobody would re-examine.
+- **Lockfiles remain absent; bounds do not.** Python requirements are now
+  bounded at the next major and `bridge/package.json` pins exact versions, but
+  `uv.lock` and `package-lock.json` need a resolver run this repo's tooling
+  cannot perform. Recorded as still open rather than claimed.
+- **`block_working_dir_changes` was left unmet deliberately.** The dotted
+  handler path is still not verbatim-confirmed from upstream, and a guessed
+  import fails at session start rather than at review. The owned `dir_guard`
+  plus `sandbox.write_paths` stays (ADR-010).
 - **T05, `LEFT DIRTY` path.** Subtask 7 (simulate a rollback failure) is not
   covered. Forcing `git reset --hard` to fail requires making the object store
   unwritable mid-merge, which is platform-specific enough to be its own
