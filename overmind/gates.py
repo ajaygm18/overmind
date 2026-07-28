@@ -142,6 +142,11 @@ def ambiguity_halt(score: float, threshold: float) -> GateResult:
 
     Halts before spending rather than failing after. The score is model-produced,
     so it inherits the scorer's calibration error — documented, not hidden.
+
+    The threshold itself is the weak part. `overmind.calibration` holds the
+    labelled goal corpus and the chooser that would derive it from recorded
+    planner scores; until those scores exist the shipped 0.65 is provisional,
+    and it says so in overmind.toml, in that module, and in LIMITATIONS.md.
     """
     if score >= threshold:
         return _halt(
