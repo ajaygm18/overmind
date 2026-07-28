@@ -201,4 +201,25 @@ class Receipt(BaseModel):
 
     status: Literal["ok", "failed", "halted", "skipped"] = "ok"
     error: str | None = None
+
+    # When the work this receipt describes began. Optional on purpose: receipts
+    # written before this field existed do not have it, and a ledger is
+    # append-only, so `overmind export` has to keep reading them. A consumer
+    # that finds it absent falls back to deriving the span start from the
+    # previous entry and must say so.
+    started_at: datetime | None = None
+
+    # When the entry was appended. Always present; this is the span end.
     at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    @property
+    def duration_s(self) -> float | None:
+        """Measured wall-clock seconds, or None if this receipt predates timing.
+
+        Returns None rather than 0.0 for the missing case. A zero would be
+        indistinguishable from a genuinely instant node and would quietly turn
+        "unknown" into a number someone could average.
+        """
+        if self.started_at is None:
+            return None
+        return max(0.0, (self.at - self.started_at).total_seconds())
