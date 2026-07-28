@@ -157,7 +157,7 @@ worse than one marked `blocked`.
   rewritten to list only what is still open, with the closed items kept in a
   final section so a reader of the earlier version can see where they went.
 - **Ambiguity calibration is half a fix, and says so.** `overmind/calibration.py`
-  and `tests/mast/ambiguity.jsonl` supply the corpus, the format, and a chooser
+  and `tests/calibration/ambiguity.jsonl` supply the corpus, the format, and a chooser
   that maximises Youden's J; `tools/calibrate_ambiguity.py` exits non-zero
   rather than printing a threshold when no scores exist. The scores cannot be
   produced here — they are the planner's self-report and need a live
