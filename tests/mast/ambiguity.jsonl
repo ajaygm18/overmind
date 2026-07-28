@@ -1,0 +1,30 @@
+// Labelled goals for calibrating [run] ambiguity_threshold. See
+// overmind/calibration.py for the format and for how to record scores.
+//
+// ambiguous = true means a competent engineer would have to ask a question
+// before starting, and any answer they guessed could be the wrong one.
+// ambiguous = false means the goal names its artifact and its finished state,
+// even if the work itself is large.
+//
+// `score` is the planner's self-reported ambiguity and is null until recorded
+// against a live coordinator. Do not fill these in by hand.
+{"goal": "add a --json flag to `overmind list` that prints one object per run with the same columns as the table", "ambiguous": false, "why": "names the command, the flag, and the output shape", "score": null}
+{"goal": "make the receipts ledger redact tool arguments matching a configurable list of key names", "ambiguous": false, "why": "one behaviour, one config surface, testable without asking anything", "score": null}
+{"goal": "raise IntegrationError instead of returning False when the base branch cannot be resolved", "ambiguous": false, "why": "names the function's current and desired behaviour", "score": null}
+{"goal": "port tests/test_linearity.py to use the shared git fixture in tests/gitfixture.py", "ambiguous": false, "why": "source, destination, and scope are all stated", "score": null}
+{"goal": "add a --since flag to `overmind list` that filters runs by receipt date", "ambiguous": false, "why": "the filter field is named; date parsing is a detail, not a fork", "score": null}
+{"goal": "document every gate's MAST mode in docs/MAST-GATES.md and fail CI when a gate is missing from the table", "ambiguous": false, "why": "the check is stated precisely enough to implement wrong-free", "score": null}
+{"goal": "cache embeddings per run so a node re-checked after resume does not call embeddings_generate twice", "ambiguous": false, "why": "the duplicate call and its scope are both identified", "score": null}
+{"goal": "emit overmind.node.role as a span attribute in the OTLP export", "ambiguous": false, "why": "one attribute, one exporter, no design decision left open", "score": null}
+{"goal": "reject an agent spec whose executor names a harness not listed in [vendors]", "ambiguous": false, "why": "the invalid state and the place to catch it are named", "score": null}
+{"goal": "replace the print() calls in cli.py with rich console output using the existing theme", "ambiguous": false, "why": "mechanical, and the target style already exists in the repo", "score": null}
+{"goal": "make the system faster", "ambiguous": true, "why": "no artifact, no measure, no finished state", "score": null}
+{"goal": "improve the agent's reasoning", "ambiguous": true, "why": "names a quality nobody can check, in a component nobody has identified", "score": null}
+{"goal": "add support for more providers", "ambiguous": true, "why": "which providers, and support meaning what -- routing, auth, or both", "score": null}
+{"goal": "fix the flaky test", "ambiguous": true, "why": "which test, and flaky how; the answer changes the entire diff", "score": null}
+{"goal": "make it production ready", "ambiguous": true, "why": "a whole roadmap wearing the costume of one task", "score": null}
+{"goal": "clean up the codebase", "ambiguous": true, "why": "unbounded scope with no acceptance criterion available", "score": null}
+{"goal": "handle errors better", "ambiguous": true, "why": "better than what, and at which boundary", "score": null}
+{"goal": "add a dashboard", "ambiguous": true, "why": "audience, data, and delivery surface are all unstated, and ADR-006 may forbid it outright", "score": null}
+{"goal": "integrate with our internal tooling", "ambiguous": true, "why": "the other side of the integration is not named at all", "score": null}
+{"goal": "refactor the gates so they are easier to extend", "ambiguous": true, "why": "extend along which axis; the plausible refactors contradict each other", "score": null}
