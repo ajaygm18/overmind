@@ -12,10 +12,10 @@ labels. What it deliberately does not do is invent scores. The score comes from
 the planning model's own self-report, so the corpus ships with `score: null`
 and a recorded procedure for filling it in:
 
-    for each goal in tests/mast/ambiguity.jsonl:
+    for each goal in tests/calibration/ambiguity.jsonl:
         overmind plan "<goal>" --dry-run   # send the printed request to the bridge
         record the `ambiguity` field the coordinator returns as `score`
-    python tools/calibrate_ambiguity.py --corpus tests/mast/ambiguity.jsonl
+    python tools/calibrate_ambiguity.py --corpus tests/calibration/ambiguity.jsonl
 
 Until that is run against a live planner, `PROVISIONAL_DEFAULT` is what ships,
 and it is labelled provisional everywhere it appears. Fabricating scores here
@@ -38,7 +38,7 @@ from pathlib import Path
 # cannot drift apart silently; tests assert they agree.
 PROVISIONAL_DEFAULT = 0.65
 
-DEFAULT_CORPUS = Path("tests/mast/ambiguity.jsonl")
+DEFAULT_CORPUS = Path("tests/calibration/ambiguity.jsonl")
 
 
 @dataclass(frozen=True)
