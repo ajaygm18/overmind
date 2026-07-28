@@ -147,6 +147,18 @@ class Similarity:
         return ngram_similarity(texts[i], texts[j])
 
 
+def degraded(source: str, cfg: MemoryConfig | None) -> bool:
+    """True when embeddings were required and the offline fallback ran instead.
+
+    The fallback is the right behaviour by default -- a memory outage must not
+    fail an otherwise healthy run, and CI has no Ruflo at all. But a run that
+    declared `[memory] require_embeddings = true` asked for the stronger measure
+    on purpose, and quietly giving it the weaker one is how a rephrased loop
+    gets waved through by a gate that reports PASS.
+    """
+    return bool(cfg and cfg.require_embeddings and source != "ruflo-embeddings")
+
+
 @dataclass
 class LoopFinding:
     start: int
@@ -204,22 +216,39 @@ def loop_detect_semantic(
     texts = [t for t in texts if t]
     finding, source = find_loop(texts, threshold=threshold, window=window, cfg=cfg)
 
-    if finding is None:
+    if finding is not None:
+        # A loop found by the weaker measure is still a loop. Report the finding
+        # rather than the degradation; the source is in the detail either way.
         return GateResult(
             gate="loop_detect_semantic",
-            status=GateStatus.PASS,
-            detail=f"{len(texts)} tool call(s), no repeated run (via {source})",
+            status=GateStatus.FAIL,
+            mast_mode="step repetition",
+            detail=(
+                f"{receipt.node_id} repeated {finding.length} near-identical actions from index "
+                f"{finding.start} (similarity {finding.similarity}, via {source}): "
+                f"{finding.sample!r}"
+            ),
+        )
+
+    if degraded(source, cfg):
+        # "No loop found by the weaker measure" is not evidence of no loop, and
+        # this run said it did not accept the weaker measure.
+        return GateResult(
+            gate="loop_detect_semantic",
+            status=GateStatus.FAIL,
+            mast_mode="step repetition",
+            detail=(
+                f"{receipt.node_id} was checked with character n-grams because ruflo "
+                "embeddings were unavailable, and this run set [memory] "
+                "require_embeddings = true. the trace looks clean under the weaker "
+                "measure, which is not the same as being clean."
+            ),
         )
 
     return GateResult(
         gate="loop_detect_semantic",
-        status=GateStatus.FAIL,
-        mast_mode="step repetition",
-        detail=(
-            f"{receipt.node_id} repeated {finding.length} near-identical actions from index "
-            f"{finding.start} (similarity {finding.similarity}, via {source}): "
-            f"{finding.sample!r}"
-        ),
+        status=GateStatus.PASS,
+        detail=f"{len(texts)} tool call(s), no repeated run (via {source})",
     )
 
 
