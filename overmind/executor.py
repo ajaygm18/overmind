@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .agentspec import write_spec
@@ -46,6 +47,9 @@ class NodeOutcome:
     stdout_tail: str = ""
     spec: Path | None = None
     error: str | None = None
+    # Wall clock at the moment this node's work began. Carried into the receipt
+    # so span durations are measured rather than inferred from ledger order.
+    started_at: datetime | None = None
 
 
 def preflight() -> list[str]:
@@ -150,6 +154,10 @@ def execute(node: TaskNode, cfg: Config, run_id: str) -> NodeOutcome:
     if node.harness is None:
         raise ExecutorError(f"node {node.id} was not routed")
 
+    # Before the worktree, not after. Creating one is work the run pays for, and
+    # starting the clock later would leave it in the gap between spans.
+    started = datetime.now(UTC)
+
     worktree = make_worktree(node, run_id)
     spec = write_spec(node, cfg, run_id, worktree)
 
@@ -161,7 +169,13 @@ def execute(node: TaskNode, cfg: Config, run_id: str) -> NodeOutcome:
         res = _run(cmd, timeout=7200)
     except subprocess.TimeoutExpired:
         return NodeOutcome(
-            node.id, None, None, worktree, spec=spec, error="omnigent session timed out"
+            node.id,
+            None,
+            None,
+            worktree,
+            spec=spec,
+            error="omnigent session timed out",
+            started_at=started,
         )
 
     cost, tin, tout, calls = _parse_usage(res.stdout)
@@ -177,6 +191,7 @@ def execute(node: TaskNode, cfg: Config, run_id: str) -> NodeOutcome:
         decisions=_parse_decisions(res.stdout),
         stdout_tail=res.stdout[-4000:],
         spec=spec,
+        started_at=started,
     )
 
     if res.returncode != 0:
@@ -207,6 +222,7 @@ def to_receipt(
         worktree=str(outcome.worktree) if outcome.worktree else None,
         status=status,  # type: ignore[arg-type]
         error=outcome.error,
+        started_at=outcome.started_at,
     )
 
 
