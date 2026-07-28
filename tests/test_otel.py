@@ -196,12 +196,68 @@ def test_an_empty_ledger_produces_no_spans() -> None:
 # -- honesty ---------------------------------------------------------------
 
 
-def test_every_span_says_its_timing_is_derived() -> None:
-    """Receipt has `at` and no start time, so durations are inferred from ledger
-    order. A backend rendering an inferred duration as a measured one is exactly
-    the kind of quiet wrongness this attribute exists to prevent."""
+def test_a_ledger_without_start_times_falls_back_to_ledger_order() -> None:
+    """Receipts written before `started_at` existed have no start time, so their
+    durations are inferred. A backend rendering an inferred duration as a
+    measured one is the quiet wrongness this attribute exists to prevent."""
     for span in spans_of(otel.to_otlp(LEDGER)):
         assert attrs_of(span)["overmind.timing.source"] == otel.DERIVED
+
+
+MEASURED_LEDGER = [
+    receipt(
+        "impl",
+        offset=120,
+        started_at=(START + timedelta(seconds=20)).isoformat(),
+        role="implementer",
+    ),
+    receipt(
+        "verify",
+        offset=200,
+        started_at=(START + timedelta(seconds=130)).isoformat(),
+        role="verifier",
+    ),
+]
+
+
+def test_a_measured_span_uses_its_own_start_not_the_previous_entry() -> None:
+    spans = spans_of(otel.to_otlp(MEASURED_LEDGER))
+    impl = next(s for s in spans if s["name"] == "node.impl")
+    assert attrs_of(impl)["overmind.timing.source"] == otel.MEASURED
+    elapsed = int(impl["endTimeUnixNano"]) - int(impl["startTimeUnixNano"])
+    assert elapsed == 100 * 1_000_000_000  # 12:00:20 -> 12:02:00
+
+
+def test_the_run_span_starts_when_its_first_node_started() -> None:
+    """Anchoring the root at the first `at` would clip the first node's duration
+    off the front of the trace."""
+    spans = spans_of(otel.to_otlp(MEASURED_LEDGER))
+    root = next(s for s in spans if "parentSpanId" not in s)
+    impl = next(s for s in spans if s["name"] == "node.impl")
+    assert root["startTimeUnixNano"] == impl["startTimeUnixNano"]
+    assert attrs_of(root)["overmind.timing.source"] == otel.MEASURED
+
+
+def test_one_unmeasured_node_downgrades_the_run_span_and_nothing_else() -> None:
+    """Per receipt, not per run. One old entry must not discredit the rest of a
+    trace that was genuinely measured."""
+    spans = spans_of(otel.to_otlp([*MEASURED_LEDGER, receipt("legacy", offset=260)]))
+
+    root = next(s for s in spans if "parentSpanId" not in s)
+    assert attrs_of(root)["overmind.timing.source"] == otel.DERIVED
+
+    impl = next(s for s in spans if s["name"] == "node.impl")
+    assert attrs_of(impl)["overmind.timing.source"] == otel.MEASURED
+
+    legacy = next(s for s in spans if s["name"] == "node.legacy")
+    assert attrs_of(legacy)["overmind.timing.source"] == otel.DERIVED
+
+
+def test_an_unmeasured_receipt_reports_no_duration_rather_than_zero() -> None:
+    """Zero would be indistinguishable from a genuinely instant node, and would
+    turn 'unknown' into a number someone could average."""
+    assert receipt("bare", offset=0).duration_s is None
+    assert receipt("m", offset=45, started_at=START.isoformat()).duration_s == 45.0
 
 
 def test_spans_never_end_before_they_start() -> None:
