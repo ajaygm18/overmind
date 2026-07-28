@@ -153,8 +153,44 @@ def prove_disjoint(plan: Plan, audits: dict[str, WriteAudit]) -> list[GateResult
     Only nodes that actually ran concurrently are compared. Nodes the rewriter
     serialized are excluded, because the second one legitimately saw and built
     on the first one's work.
+
+    The gate refuses rather than passes when it cannot answer the question. It
+    learns which nodes ran together from `plan.levels`; a plan that arrives with
+    none, or with audited nodes missing from all of them, would otherwise
+    produce a clean proof over zero comparisons -- a green result that means
+    "not checked", which is precisely what this gate exists to prevent.
     """
     results: list[GateResult] = []
+
+    scheduled = {nid for level in plan.levels for nid in level}
+
+    if len(plan.nodes) > 1 and not scheduled:
+        return [
+            GateResult(
+                gate="prove_disjoint",
+                status=GateStatus.FAIL,
+                mast_mode="conflicting implicit decisions",
+                detail=(
+                    f"plan has {len(plan.nodes)} nodes and no levels, so nothing is "
+                    "known about which of them ran concurrently. the rewriter did "
+                    "not run, and an unproven plan is not a disjoint one."
+                ),
+            )
+        ]
+
+    unscheduled = sorted(set(audits) - scheduled)
+    if unscheduled and scheduled:
+        return [
+            GateResult(
+                gate="prove_disjoint",
+                status=GateStatus.FAIL,
+                mast_mode="conflicting implicit decisions",
+                detail=(
+                    f"{unscheduled} produced write audits but appear in no level. "
+                    "they ran, and the gate has no record of what ran beside them."
+                ),
+            )
+        ]
 
     for level in plan.levels:
         present = [nid for nid in level if nid in audits]
