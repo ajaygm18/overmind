@@ -7,6 +7,7 @@ the process working directory by design.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -301,3 +302,132 @@ def test_commit_worktree_returns_a_sha_when_it_committed(repo: Repo) -> None:
     repo.work(wt, "src/auth.py", "auth\n")
     sha = integrate.commit_worktree(wt, "n1")
     assert sha and len(sha) == 40
+
+
+# --------------------------------------------------------------------------
+# when the rollback itself fails
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def reset_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make `git reset --hard` fail, and nothing else.
+
+    The real-world causes are an unwritable `.git`, a filesystem that has gone
+    read-only, or an index lock left by another process. All of them arrive at
+    the same place: a non-zero reset in the middle of an abort. Injecting at
+    the subprocess boundary reproduces that without making the fixture
+    repository unrepairable, which would break teardown on some platforms.
+    """
+    real = integrate._git
+
+    def patched(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+        if args[:2] == ["reset", "--hard"]:
+            return subprocess.CompletedProcess(
+                args=["git", *args],
+                returncode=1,
+                stdout="",
+                stderr="fatal: Unable to write new index file",
+            )
+        return real(args, cwd)
+
+    monkeypatch.setattr(integrate, "_git", patched)
+
+
+def test_a_failed_rollback_is_reported_rather_than_swallowed(
+    repo: Repo, reset_refuses: None
+) -> None:
+    """`rolled_back` must be False here. Reporting a rollback that did not
+    happen is worse than the conflict: the operator would trust a tree that
+    still contains half a plan."""
+    base = repo.head()
+    a, b, c = repo.worktree(RUN, "n1"), repo.worktree(RUN, "n2"), repo.worktree(RUN, "n3")
+    repo.work(a, "src/first.py", "first\n")
+    repo.work(b, "src/app.py", "VERSION = 2\n")
+    repo.work(c, "src/app.py", "VERSION = 3\n")
+
+    report = integrate.integrate(
+        plan(
+            [
+                node("n1", ["src/first.py"]),
+                node("n2", ["src/app.py"]),
+                node("n3", ["src/app.py"]),
+            ]
+        ),
+        RUN,
+        [receipt("n1", a), receipt("n2", b), receipt("n3", c)],
+    )
+
+    assert not report.ok
+    assert not report.rolled_back
+    assert report.base_sha == base
+
+
+def test_a_failed_rollback_says_left_dirty_and_names_the_base(
+    repo: Repo, reset_refuses: None
+) -> None:
+    """The summary is the only thing most operators will read, so it has to
+    distinguish the two outcomes in words, not just in a boolean."""
+    a, b = repo.worktree(RUN, "n1"), repo.worktree(RUN, "n2")
+    repo.work(a, "src/app.py", "VERSION = 2\n")
+    repo.work(b, "src/app.py", "VERSION = 3\n")
+
+    report = integrate.integrate(
+        plan([node("n1", ["src/app.py"]), node("n2", ["src/app.py"])]),
+        RUN,
+        [receipt("n1", a), receipt("n2", b)],
+    )
+
+    summary = report.summary()
+    assert "LEFT DIRTY" in summary
+    assert "rolled back" not in summary
+    assert integrate.clean_merge(report).status is GateStatus.FAIL
+
+
+def test_the_partial_state_after_a_failed_rollback_is_the_documented_one(
+    repo: Repo, reset_refuses: None
+) -> None:
+    """Pin what actually survives, so a future change to the abort sequence is
+    visible rather than discovered by an operator: the merge is aborted, so no
+    conflict markers remain, but every branch merged before the conflict is
+    still on the base branch."""
+    base = repo.head()
+    a, b, c = repo.worktree(RUN, "n1"), repo.worktree(RUN, "n2"), repo.worktree(RUN, "n3")
+    repo.work(a, "src/first.py", "first\n")
+    repo.work(b, "src/app.py", "VERSION = 2\n")
+    repo.work(c, "src/app.py", "VERSION = 3\n")
+
+    integrate.integrate(
+        plan(
+            [
+                node("n1", ["src/first.py"]),
+                node("n2", ["src/app.py"]),
+                node("n3", ["src/app.py"]),
+            ]
+        ),
+        RUN,
+        [receipt("n1", a), receipt("n2", b), receipt("n3", c)],
+    )
+
+    assert not repo.merging(), "a half-finished merge would break the next command"
+    assert repo.head() != base, "this is the state the report calls LEFT DIRTY"
+    assert repo.exists("src/first.py")
+
+
+def test_rollback_reports_failure_for_an_unresolvable_base(repo: Repo) -> None:
+    """No injection: git itself refuses, and the return value must be False
+    rather than an exception, because the caller is already handling a
+    conflict when it runs."""
+    assert integrate.rollback("0000000000000000000000000000000000000000") is False
+
+
+def test_rollback_succeeds_on_a_real_base(repo: Repo) -> None:
+    """The negative test above is only meaningful if the positive one holds."""
+    base = repo.head()
+    repo.write("src/extra.py", "x = 1\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo.path, check=True)
+    subprocess.run(["git", "commit", "-m", "extra"], cwd=repo.path, check=True)
+
+    assert integrate.rollback(base) is True
+    assert repo.head() == base
+    assert not repo.exists("src/extra.py")
