@@ -8,13 +8,14 @@
     "start": "tsx planner.ts",
     "typecheck": "tsc --noEmit"
   },
+  "//": "Exact versions, not carets. There is no package-lock.json here, so a caret range would let the Docker image resolve a different tree on every build while the file that describes it stayed identical. Upgrades are therefore commits. See ../docs/PINS.md.",
   "dependencies": {
-    "@open-multi-agent/core": "^0.9.0"
+    "@open-multi-agent/core": "0.9.0"
   },
   "devDependencies": {
-    "@types/node": "^22.7.0",
-    "tsx": "^4.19.0",
-    "typescript": "^5.6.0"
+    "@types/node": "22.7.0",
+    "tsx": "4.19.0",
+    "typescript": "5.6.0"
   },
   "engines": {
     "node": ">=22"
