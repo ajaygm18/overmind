@@ -26,7 +26,7 @@ from collections.abc import Iterable
 
 from .config import MemoryConfig
 from .models import GateResult, GateStatus, Plan, Receipt, Role, TaskNode
-from .semantic import restatement_fidelity_measured
+from .semantic import degraded, restatement_fidelity_measured
 
 _REJECTION = re.compile(r"\b(reject|won'?t fix|out of scope|disagree|not applicable)\b", re.I)
 _VERDICT = re.compile(r"^\s*(pass|fail)\b", re.I)
@@ -363,8 +363,12 @@ def acceptance_drift(
 
     `detail` reports the fidelity, the measure that produced it, and word
     overlap as a second opinion. Overlap is never load-bearing: the fallback
-    from embeddings to n-grams happens inside `restatement_fidelity_measured`,
-    so there is no measure-unavailable branch here to hide.
+    from embeddings to n-grams happens inside `restatement_fidelity_measured`.
+
+    That fallback is silent by default and must not be. Under `[memory]
+    require_embeddings` a score that came from n-grams cannot clear this gate,
+    because an n-gram score above the threshold says the two texts share
+    characters, not that they mean the same thing.
     """
     original = node.acceptance.strip()
     if not original:
@@ -388,6 +392,16 @@ def acceptance_drift(
             f"{node.id} was verified against a restatement with fidelity {fidelity:.2f} "
             f"(< {DRIFT_THRESHOLD:.2f}, measured via {source}, word overlap "
             f"{overlap:.0%}): {restated[:120]!r}",
+        )
+
+    if degraded(source, cfg):
+        return _fail(
+            "acceptance_drift",
+            "task derailment",
+            f"{node.id} scored {fidelity:.2f} via {source} because ruflo embeddings "
+            "were unavailable, and this run set [memory] require_embeddings = true. "
+            "a passing n-gram score says the two texts share characters, not that "
+            "the restatement preserved the criterion's meaning.",
         )
 
     return _ok(
