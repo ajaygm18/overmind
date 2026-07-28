@@ -9,7 +9,10 @@ Everything runs offline: no git repository, no model, no upstream process.
 
 from __future__ import annotations
 
-from overmind import introspect, semantic
+import pytest
+
+from overmind import gates, introspect, semantic
+from overmind.config import MemoryConfig
 from overmind.models import ExitCheck, ExitKind, Plan, Receipt, Role, TaskNode
 
 
@@ -237,3 +240,146 @@ def test_embedding_payload_shapes_are_parsed_or_rejected_cleanly() -> None:
     assert semantic._parse_vectors({"unexpected": "shape"}, 2) is None
     assert semantic._parse_vectors([[1.0]], 2) is None
     assert semantic._parse_vectors("not json", 2) is None
+
+
+# -- refusing to prove disjointness from nothing -----------------------------
+
+
+def test_an_unscheduled_multi_node_plan_is_refused_not_passed() -> None:
+    """A plan whose levels were never populated used to sail through: the gate
+    iterated `levels`, found no concurrent pairs, and reported PASS. That is a
+    statement about the plan's metadata, not about the run."""
+    p = Plan(goal="g", nodes=[node("a", writes=["src/a.py"]), node("b", writes=["src/b.py"])])
+    assert p.levels == []
+    audits = {
+        "a": introspect.WriteAudit("a", ["src/a.py"], {"src/a.py", "src/shared.py"}),
+        "b": introspect.WriteAudit("b", ["src/b.py"], {"src/b.py", "src/shared.py"}),
+    }
+    failures = [g for g in introspect.prove_disjoint(p, audits) if g.blocking]
+    assert failures, "an unscheduled plan cannot prove anything about concurrency"
+
+
+def test_an_audited_node_missing_from_every_level_is_refused() -> None:
+    """Partial levels are worse than none: the gate would report on the nodes it
+    knows about and stay silent about the one it does not."""
+    p = Plan(
+        goal="g",
+        nodes=[node("a", writes=["src/a.py"]), node("b", writes=["src/b.py"])],
+        levels=[["a"]],
+    )
+    audits = {
+        "a": introspect.WriteAudit("a", ["src/a.py"], {"src/a.py"}),
+        "b": introspect.WriteAudit("b", ["src/b.py"], {"src/b.py"}),
+    }
+    failures = [g for g in introspect.prove_disjoint(p, audits) if g.blocking]
+    assert failures
+    assert "b" in failures[0].detail
+
+
+def test_a_single_node_plan_still_passes_trivially() -> None:
+    """One node cannot collide with itself, so the refusal must not fire here --
+    otherwise every serial run reports a spurious failure and the gate gets
+    switched off."""
+    p = Plan(goal="g", nodes=[node("a", writes=["src/a.py"])])
+    audits = {"a": introspect.WriteAudit("a", ["src/a.py"], {"src/a.py", "src/extra.py"})}
+    assert not [g for g in introspect.prove_disjoint(p, audits) if g.blocking]
+
+
+# -- required embeddings ----------------------------------------------------
+
+REQUIRED = MemoryConfig(
+    enabled=True, command=["true"], recall_limit=4, require_embeddings=True
+)
+OPTIONAL = MemoryConfig(enabled=False, command=["true"], recall_limit=4)
+
+
+@pytest.fixture
+def no_ruflo(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the embedding path unreachable without spawning anything.
+
+    CI has no Ruflo either way; failing at construction keeps the test
+    hermetic instead of depending on how a dead MCP process happens to fail.
+    """
+
+    def unavailable(cfg: object) -> object:
+        raise semantic.MemoryUnavailable("no ruflo under test")
+
+    monkeypatch.setattr(semantic, "RufloMemory", unavailable)
+
+
+def test_requiring_embeddings_from_disabled_memory_is_rejected_at_load() -> None:
+    """A contradiction in config must fail at load, not at the first gate an
+    hour into a run."""
+    with pytest.raises(ValueError, match="require_embeddings"):
+        MemoryConfig(enabled=False, require_embeddings=True)
+
+
+def test_a_clean_trace_measured_by_the_fallback_fails_when_embeddings_were_required(
+    no_ruflo: None,
+) -> None:
+    """The motivating case. 'No loop found by the weaker measure' is not
+    evidence of no loop, and this run said it did not accept the weaker
+    measure."""
+    receipt = Receipt(
+        run_id="r",
+        plan_hash="h",
+        node_id="impl",
+        tool_calls=[
+            call("read", path="src/auth/device.py"),
+            call("write", path="src/auth/device.py"),
+            call("bash", cmd="pytest tests/test_device.py"),
+        ],
+    )
+    result = semantic.loop_detect_semantic(receipt, cfg=REQUIRED)
+    assert result.blocking
+    assert result.mast_mode == "step repetition"
+    assert "require_embeddings" in result.detail
+
+
+def test_the_same_trace_passes_when_the_fallback_was_acceptable(no_ruflo: None) -> None:
+    receipt = Receipt(
+        run_id="r",
+        plan_hash="h",
+        node_id="impl",
+        tool_calls=[
+            call("read", path="src/auth/device.py"),
+            call("write", path="src/auth/device.py"),
+            call("bash", cmd="pytest tests/test_device.py"),
+        ],
+    )
+    assert not semantic.loop_detect_semantic(receipt, cfg=OPTIONAL).blocking
+
+
+def test_a_real_loop_is_reported_as_a_loop_not_as_a_degradation(no_ruflo: None) -> None:
+    """Order matters: the finding is the useful message. Reporting the missing
+    measure instead would hide the loop the weaker measure just caught."""
+    receipt = Receipt(
+        run_id="r",
+        plan_hash="h",
+        node_id="impl",
+        tool_calls=[call("grep", q="device") for _ in range(3)],
+    )
+    result = semantic.loop_detect_semantic(receipt, cfg=REQUIRED)
+    assert result.blocking
+    assert "near-identical" in result.detail
+    assert "require_embeddings" not in result.detail
+
+
+def test_degraded_is_only_true_when_the_stronger_measure_was_asked_for() -> None:
+    assert semantic.degraded("ngram", REQUIRED)
+    assert not semantic.degraded("ruflo-embeddings", REQUIRED)
+    assert not semantic.degraded("ngram", OPTIONAL)
+    assert not semantic.degraded("ngram", None)
+
+
+def test_acceptance_drift_will_not_pass_on_an_unrequested_measure(no_ruflo: None) -> None:
+    """The drift gate has the same hole: a high n-gram score looks exactly like
+    a high embedding score once it reaches the report."""
+    n = node("impl")
+    faithful = n.acceptance
+    assert not gates.acceptance_drift(n, faithful).blocking
+    assert not gates.acceptance_drift(n, faithful, OPTIONAL).blocking
+
+    result = gates.acceptance_drift(n, faithful, REQUIRED)
+    assert result.blocking
+    assert result.mast_mode == "task derailment"
