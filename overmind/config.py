@@ -26,6 +26,28 @@ class MemoryConfig(BaseModel):
     )
     recall_limit: int = 12
 
+    # Whether the semantic gates may fall back to character n-grams.
+    #
+    # False (default): a memory outage degrades the measure and every result
+    # says `via ngram`. Right for CI, which has no Ruflo and must still exercise
+    # the gate offline.
+    #
+    # True: the fallback is a gate failure. Right for a real run, where a
+    # silently weaker loop detector waves through the rephrased repetition it
+    # was installed to catch. Requires `enabled = true`; asking for embeddings
+    # from a memory layer that is switched off is a contradiction, not a
+    # preference, so it is rejected at load rather than at the first gate.
+    require_embeddings: bool = False
+
+    @model_validator(mode="after")
+    def _required_implies_enabled(self) -> MemoryConfig:
+        if self.require_embeddings and not self.enabled:
+            raise ValueError(
+                "[memory] require_embeddings = true needs enabled = true; "
+                "embeddings cannot be required from a disabled memory layer"
+            )
+        return self
+
 
 class PolicyConfig(BaseModel):
     ask_on_shell: bool = True
