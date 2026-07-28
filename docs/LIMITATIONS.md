@@ -21,7 +21,7 @@ judge.
 
 **`ambiguity_halt`'s threshold is still provisional.** Half of this is now
 closed: `overmind/calibration.py` defines the labelled corpus format and the
-chooser that maximises Youden's J over recorded scores, `tests/mast/ambiguity.jsonl`
+chooser that maximises Youden's J over recorded scores, `tests/calibration/ambiguity.jsonl`
 ships twenty labelled goals with a stated reason each, and
 `tools/calibrate_ambiguity.py` exits non-zero rather than printing a number when
 the corpus has no scores. What is missing is the scores themselves: the input to
