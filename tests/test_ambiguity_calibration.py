@@ -16,7 +16,7 @@ from overmind import calibration
 from overmind.config import load as load_config
 
 ROOT = Path(__file__).resolve().parents[1]
-CORPUS = ROOT / "tests" / "mast" / "ambiguity.jsonl"
+CORPUS = ROOT / "tests" / "calibration" / "ambiguity.jsonl"
 
 
 def obs(score: float | None, ambiguous: bool) -> calibration.Observation:
