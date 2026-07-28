@@ -35,6 +35,12 @@ enabled = true
 command = ["npx", "ruflo@latest", "mcp", "start"]
 # Prior decisions injected into the planner prompt.
 recall_limit = 12
+# Whether the semantic gates may fall back to character n-grams when ruflo is
+# unreachable. false keeps a memory outage from failing an otherwise healthy
+# run; true is the honest setting for a real run, because a silently weaker
+# loop detector waves through the rephrased repetition it exists to catch.
+# Requires enabled = true.
+require_embeddings = false
 
 [policies]
 # Passed through to Omnigent's policy engine. Overmind does not implement
