@@ -13,13 +13,14 @@ substantial dependency to serialize data that is already complete and at rest.
 
 Two things this deliberately does not pretend:
 
-1. **Durations are derived.** A `Receipt` has `at`, the moment the entry was
-   appended, and no start timestamp. A node's span therefore runs from the
-   previous ledger entry to its own, which approximates that node's wall time
-   and is not a measurement of it. Every such span carries
-   `overmind.timing.source="derived-from-ledger-order"`. The real fix is a
-   `started_at` field on `Receipt`; until then the attribute is the honest
-   signal, and a `0` duration would be a lie in a different font.
+1. **Durations are measured where the receipt allows it, derived where it does
+   not.** `Receipt.started_at` records when a node's work began, so its span is
+   real wall time. Receipts written before that field existed do not have it,
+   and a ledger is append-only, so those spans still run from the previous entry
+   to their own -- an approximation, not a measurement. Every span says which it
+   is via `overmind.timing.source`, and the choice is made per receipt so one
+   old entry does not discredit the rest of the trace. The run span claims
+   measurement only when every node beneath it was measured.
 
 2. **Tool arguments never leave.** Ledger redaction is opt-in
    (`ReceiptConfig.redact_tool_args`), so a receipt on disk may contain secrets
@@ -55,7 +56,10 @@ SPAN_KIND_INTERNAL = 1
 # OTLP status codes.
 STATUS_UNSET, STATUS_OK, STATUS_ERROR = 0, 1, 2
 
+# Which clock a span's duration came from. Exported on every span, because a
+# backend cannot tell an inferred duration from a measured one by looking.
 DERIVED = "derived-from-ledger-order"
+MEASURED = "measured-from-receipt"
 
 
 class ExportFailed(Exception):
@@ -180,10 +184,21 @@ def build_spans(receipts: list[Receipt]) -> list[dict[str, Any]]:
     run_id = ordered[0].run_id
     root_id = span_id(run_id, "run")
     tid = trace_id(run_id)
-    started, ended = nanos(ordered[0].at), nanos(ordered[-1].at)
 
     nodes = [r for r in ordered if r.kind == "node"]
     node_ids = {r.node_id for r in nodes}
+
+    # The run began when its earliest entry began. Using that entry's `at` would
+    # clip the first node's duration off the front of the trace.
+    first = ordered[0]
+    started = nanos(first.started_at or first.at)
+    ended = nanos(ordered[-1].at)
+
+    # A root claiming measurement over a child that guessed is the misleading
+    # case, so the run is only as trustworthy as its least-instrumented node.
+    run_source = (
+        MEASURED if nodes and all(r.started_at is not None for r in nodes) else DERIVED
+    )
 
     spans: list[dict[str, Any]] = [
         {
@@ -204,7 +219,7 @@ def build_spans(receipts: list[Receipt]) -> list[dict[str, Any]]:
                     "overmind.failed_nodes": [
                         r.node_id for r in nodes if r.status == "failed"
                     ],
-                    "overmind.timing.source": DERIVED,
+                    "overmind.timing.source": run_source,
                 }
             ),
             "status": {"code": STATUS_ERROR if any(r.status == "failed" for r in ordered) else STATUS_OK},
@@ -223,6 +238,12 @@ def build_spans(receipts: list[Receipt]) -> list[dict[str, Any]]:
             continue  # folded into the node span below
 
         end = nanos(receipt.at)
+        if receipt.started_at is not None:
+            begin, source = nanos(receipt.started_at), MEASURED
+        else:
+            # Per receipt, not per run: a ledger can hold both kinds.
+            begin, source = min(previous, end), DERIVED
+
         events = gate_events(receipt)
         for rider in riders.get(receipt.node_id, []) if receipt.kind == "node" else []:
             events.extend(gate_events(rider))
@@ -234,7 +255,7 @@ def build_spans(receipts: list[Receipt]) -> list[dict[str, Any]]:
                 "parentSpanId": root_id,
                 "name": f"{receipt.kind}.{receipt.node_id}",
                 "kind": SPAN_KIND_INTERNAL,
-                "startTimeUnixNano": str(min(previous, end)),
+                "startTimeUnixNano": str(min(begin, end)),
                 "endTimeUnixNano": str(end),
                 "attributes": attributes(
                     {
@@ -254,7 +275,7 @@ def build_spans(receipts: list[Receipt]) -> list[dict[str, Any]]:
                         "overmind.diff_stat": receipt.diff_stat,
                         "overmind.worktree": receipt.worktree,
                         "overmind.status": receipt.status,
-                        "overmind.timing.source": DERIVED,
+                        "overmind.timing.source": source,
                     }
                 ),
                 "events": events,
